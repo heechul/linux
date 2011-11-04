@@ -1540,6 +1540,16 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 	unsigned long min_load = ULONG_MAX, this_load = 0;
 	int imbalance = 100 + (sd->imbalance_pct-100)/2;
 
+	struct cpumask tmpmask;
+	struct cpumask *cpus_allowed_ptr = &p->cpus_allowed;
+
+	/* give priority to cpuset (p->cpus_allowed) over coreidle set */
+	if (sched_governor) {
+		cpumask_andnot(&tmpmask, &p->cpus_allowed, sched_coreidle_mask);
+		if (!cpumask_empty(&tmpmask))
+			cpus_allowed_ptr = &tmpmask;
+	}
+
 	do {
 		unsigned long load, avg_load;
 		int local_group;
@@ -1547,7 +1557,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 
 		/* Skip over this group if it has no CPUs allowed */
 		if (!cpumask_intersects(sched_group_cpus(group),
-					&p->cpus_allowed))
+					cpus_allowed_ptr))
 			continue;
 
 		local_group = cpumask_test_cpu(this_cpu,
@@ -1592,8 +1602,17 @@ find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
 	int idlest = -1;
 	int i;
 
+	struct cpumask tmpmask;
+	struct cpumask *cpus_allowed_ptr = &p->cpus_allowed;
+
+	if (sched_governor) {
+		cpumask_andnot(&tmpmask, &p->cpus_allowed, sched_coreidle_mask);
+		if (!cpumask_empty(&tmpmask))
+			cpus_allowed_ptr = &tmpmask;
+	}
+
 	/* Traverse only the allowed CPUs */
-	for_each_cpu_and(i, sched_group_cpus(group), &p->cpus_allowed) {
+	for_each_cpu_and(i, sched_group_cpus(group), cpus_allowed_ptr) {
 		load = weighted_cpuload(i);
 
 		if (load < min_load || (load == min_load && i == this_cpu)) {
@@ -1615,6 +1634,18 @@ static int select_idle_sibling(struct task_struct *p, int target)
 	struct sched_domain *sd;
 	int i;
 
+	struct cpumask tmpmask;
+	struct cpumask *cpus_allowed_ptr = &p->cpus_allowed;
+
+	if (sched_governor) {
+		cpumask_andnot(&tmpmask, &p->cpus_allowed, sched_coreidle_mask);
+		if (!cpumask_empty(&tmpmask))
+			cpus_allowed_ptr = &tmpmask;
+		/* if masked by coreidle, do not select the cpu */
+		if (cpumask_test_cpu(target, cpus_allowed_ptr))
+			goto find_new_idle;
+	}
+
 	/*
 	 * If the task is going to be woken-up on this cpu and if it is
 	 * already idle, then it is the right target.
@@ -1629,6 +1660,7 @@ static int select_idle_sibling(struct task_struct *p, int target)
 	if (target == prev_cpu && idle_cpu(prev_cpu))
 		return prev_cpu;
 
+find_new_idle:
 	/*
 	 * Otherwise, iterate the domains and find an elegible idle cpu.
 	 */
@@ -1637,7 +1669,7 @@ static int select_idle_sibling(struct task_struct *p, int target)
 		if (!(sd->flags & SD_SHARE_PKG_RESOURCES))
 			break;
 
-		for_each_cpu_and(i, sched_domain_span(sd), &p->cpus_allowed) {
+		for_each_cpu_and(i, sched_domain_span(sd), cpus_allowed_ptr) {
 			if (idle_cpu(i)) {
 				target = i;
 				break;
@@ -1679,8 +1711,17 @@ select_task_rq_fair(struct task_struct *p, int sd_flag, int wake_flags)
 	int want_sd = 1;
 	int sync = wake_flags & WF_SYNC;
 
+	struct cpumask tmpmask;
+	struct cpumask *cpus_allowed_ptr = &p->cpus_allowed;
+
+	if (sched_governor) {
+		cpumask_andnot(&tmpmask, &p->cpus_allowed, sched_coreidle_mask);
+		if (!cpumask_empty(&tmpmask))
+			cpus_allowed_ptr = &tmpmask;
+	}
+
 	if (sd_flag & SD_BALANCE_WAKE) {
-		if (cpumask_test_cpu(cpu, &p->cpus_allowed))
+		if (cpumask_test_cpu(cpu, cpus_allowed_ptr))
 			want_affine = 1;
 		new_cpu = prev_cpu;
 	}
@@ -1719,7 +1760,7 @@ select_task_rq_fair(struct task_struct *p, int sd_flag, int wake_flags)
 		 * cpu is a valid SD_WAKE_AFFINE target.
 		 */
 		if (want_affine && (tmp->flags & SD_WAKE_AFFINE) &&
-		    cpumask_test_cpu(prev_cpu, sched_domain_span(tmp))) {
+		    cpumask_test_cpu(prev_cpu, sched_domain_span(tmp)))	{
 			affine_sd = tmp;
 			want_affine = 0;
 		}
@@ -2043,16 +2084,27 @@ int can_migrate_task(struct task_struct *p, struct rq *rq, int this_cpu,
 		     int *all_pinned)
 {
 	int tsk_cache_hot = 0;
+
+	struct cpumask tmpmask;
+	struct cpumask *cpus_allowed_ptr = &p->cpus_allowed;
+
+	if (sched_governor) {
+		cpumask_andnot(&tmpmask, &p->cpus_allowed, sched_coreidle_mask);
+		if (!cpumask_empty(&tmpmask))
+			cpus_allowed_ptr = &tmpmask;
+	}
+
 	/*
 	 * We do not migrate tasks that are:
 	 * 1) running (obviously), or
 	 * 2) cannot be migrated to this CPU due to cpus_allowed, or
 	 * 3) are cache-hot on their current CPU.
 	 */
-	if (!cpumask_test_cpu(this_cpu, &p->cpus_allowed)) {
+	if (!cpumask_test_cpu(this_cpu, cpus_allowed_ptr)) {
 		schedstat_inc(p, se.statistics.nr_failed_migrations_affine);
 		return 0;
 	}
+
 	*all_pinned = 0;
 
 	if (task_running(rq, p)) {
@@ -2135,6 +2187,9 @@ balance_tasks(struct rq *this_rq, int this_cpu, struct rq *busiest,
 		goto out;
 
 	list_for_each_entry_safe(p, n, &busiest_cfs_rq->tasks, se.group_node) {
+		/* HEECHUL: here must be a place where we pick tasks which
+		   will decrease contention in the global perspective */
+
 		if (loops++ > sysctl_sched_nr_migrate)
 			break;
 
@@ -3347,14 +3402,16 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 			struct sched_domain *sd, enum cpu_idle_type idle,
 			int *balance)
 {
-	int ld_moved, all_pinned = 0, active_balance = 0;
+	int ld_moved = 0, all_pinned = 0, active_balance = 0;
 	struct sched_group *group;
 	unsigned long imbalance;
 	struct rq *busiest;
 	unsigned long flags;
 	struct cpumask *cpus = __get_cpu_var(load_balance_tmpmask);
 
-	cpumask_copy(cpus, cpu_active_mask);
+	if (cpumask_test_cpu(this_cpu, sched_coreidle_mask))
+		goto out;
+	cpumask_andnot(cpus, cpu_active_mask, sched_coreidle_mask);
 
 	schedstat_inc(sd, lb_count[idle]);
 
@@ -3511,11 +3568,18 @@ static void idle_balance(int this_cpu, struct rq *this_rq)
 		return;
 
 	/*
+	 * Do not take load when masked by coreidle.
+	 */
+	if (sched_governor &&
+	     cpumask_test_cpu(this_cpu, sched_coreidle_mask))
+		return;
+	/*
 	 * Drop the rq->lock, but keep IRQ/preempt disabled.
 	 */
 	raw_spin_unlock(&this_rq->lock);
 
 	update_shares(this_cpu);
+
 	rcu_read_lock();
 	for_each_domain(this_cpu, sd) {
 		unsigned long interval;
@@ -3982,6 +4046,14 @@ static void nohz_idle_balance(int this_cpu, enum cpu_idle_type idle)
 
 	for_each_cpu(balance_cpu, nohz.idle_cpus_mask) {
 		if (balance_cpu == this_cpu)
+			continue;
+
+		/*
+		 * If idle cpu is marked by sched_coreidle_mask for powersaing,
+		 * do not give load to the core
+		 */
+		if (sched_governor &&
+		     cpumask_test_cpu(balance_cpu, sched_coreidle_mask))
 			continue;
 
 		/*

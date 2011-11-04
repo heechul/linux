@@ -791,11 +791,158 @@ static const struct file_operations sched_feat_fops = {
 	.release	= single_release,
 };
 
+
+
+/* 
+ * coreidle framework for powersaving load balancing
+ */
+#define USE_COREIDLE_POWERSAVING 1
+
+#if USE_COREIDLE_POWERSAVING
+
+#define COREIDLE_NONE      0
+#define COREIDLE_ONDEMAND  1
+#define COREIDLE_ONDEMAND_SMT 2 /* core first over thread */
+#define COREIDLE_USERSPACE 3
+
+volatile int sched_governor = COREIDLE_NONE;
+
+/* control variable. */
+cpumask_var_t sched_coreidle_mask;
+
+static unsigned long sched_load_avg;
+
+/* 
+ * explonent of running average filter. 
+ * default=exp(1676/2048=0.8). setting time=10 ticks. 
+ */
+static int sched_load_exp = 1676;
+
+/* sampling frequency in jiffies. default=100ms */
+static unsigned long sched_load_freq = HZ/10;
+
+/* next update in jiffies*/
+static unsigned long sched_load_update; 
+
+/* weight factor for system load calculation. */
+static int sched_ondemand_target = 100; 
+
+static int sched_powersaving_show(struct seq_file *m, void *v)
+{
+	char buf[512];
+	seq_printf(m, "load: %ld\n", nr_running());
+	seq_printf(m, "running load_avg: %ld, alpha:%d/%d\n",
+		   sched_load_avg, sched_load_exp, FIXED_1);
+	seq_printf(m, "load freq: %ld (jiffies) (1 jiffie=%d ms)\n",
+		   sched_load_freq, 1000/HZ);
+	seq_printf(m, "governor: %d\n", sched_governor);
+
+	switch (sched_governor) {
+	case COREIDLE_ONDEMAND:
+	case COREIDLE_ONDEMAND_SMT:
+		seq_printf(m, "\tondemand: target load/core=%d%%\n",
+			   sched_ondemand_target);
+		break;
+	case COREIDLE_USERSPACE:
+		seq_printf(m, "userspace\n");
+		break;
+	}
+	seq_printf(m, "coreidle_mask:");
+	cpulist_scnprintf(buf, sizeof(buf), sched_coreidle_mask);
+	seq_printf(m, "%s\n", buf);
+	return 0;
+}
+
+/*
+ * Usage:
+ * echo "ondemand <target load>" > /sys/kernel/debug/powersaving
+ * echo "usersapce <cpulist>" > /sys/kerenl/debug/powersaving
+ * echo "loadfreq <jiffies>" > /sys/kernel/debug/powersaving
+ */
+static ssize_t
+sched_powersaving_write(struct file *filp, const char __user *ubuf,
+		size_t cnt, loff_t *ppos)
+{
+	char buf[64];
+	char *cmp;
+	int val;
+	if (cnt > 63)
+		cnt = 63;
+
+	if (copy_from_user(&buf, ubuf, cnt))
+		return -EFAULT;
+
+	buf[cnt] = 0;
+	cmp = strstrip(buf);
+
+	if (cnt > 0) {
+		if (!strncmp(buf, "loadfreq", 8)) {
+			sscanf(buf + 8, "%ld", &sched_load_freq);
+			printk(KERN_DEBUG "sched_load_freq = %ld\n",
+			       sched_load_freq);
+		} else if (!strncmp(buf, "loadexp", 7)) {
+			sscanf(buf + 7, "%d", &sched_load_exp);
+			printk(KERN_DEBUG "sched_load_exp = %d\n",
+			       sched_load_exp);
+		}
+#if CONFIG_SCHED_SMT
+		else if (!strncmp(buf, "ondemand_smt", 12)) {
+			sched_governor = COREIDLE_ONDEMAND_SMT;
+			sscanf(buf + 12, "%d", &val);
+			if (val > 0)
+				sched_ondemand_target = val;
+			printk(KERN_DEBUG "sched_ondemand_target = %d\n",
+			       sched_ondemand_target);
+		}
+#endif
+		else if (!strncmp(buf, "ondemand", 8)) {
+			sched_governor = COREIDLE_ONDEMAND;
+			sscanf(buf + 8, "%d", &val);
+			if (val > 0)
+				sched_ondemand_target = val;
+			printk(KERN_DEBUG "sched_ondemand_target = %d\n",
+			       sched_ondemand_target);
+		} else if (!strncmp(buf, "userspace", 9)) {
+			sched_governor = COREIDLE_USERSPACE;
+			cpumask_clear(sched_coreidle_mask);
+			cpulist_parse(buf + 9, sched_coreidle_mask);
+			cpulist_scnprintf(buf, 64, sched_coreidle_mask);
+			printk(KERN_DEBUG "sched_userspace: %s\n", buf);
+		} else if (!strncmp(buf, "none", 4)) {
+			sched_governor = COREIDLE_NONE;
+			cpumask_clear(sched_coreidle_mask);
+			printk(KERN_DEBUG "sched_none: equiv. to stock scheduler\n");
+		}
+	}
+
+	*ppos += cnt;
+
+	return cnt;
+}
+
+static int sched_powersaving_open(struct inode *inode, struct file *filp)
+{
+	return single_open(filp, sched_powersaving_show, NULL);
+}
+
+static const struct file_operations sched_powersaving_fops = {
+	.open		= sched_powersaving_open,
+	.write		= sched_powersaving_write,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+#endif /* USE_COREIDLE_POWERSAVING */
 static __init int sched_init_debug(void)
 {
 	debugfs_create_file("sched_features", 0644, NULL, NULL,
-			&sched_feat_fops);
+			    &sched_feat_fops);
 
+#if USE_COREIDLE_POWERSAVING
+	debugfs_create_file("powersaving", 0644, NULL, NULL,
+			    &sched_powersaving_fops);
+#endif
 	return 0;
 }
 late_initcall(sched_init_debug);
@@ -2388,13 +2535,22 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 	int dest_cpu;
 	const struct cpumask *nodemask = cpumask_of_node(cpu_to_node(cpu));
 
+	struct cpumask tmpmask;
+	struct cpumask *cpus_allowed_ptr = &p->cpus_allowed;
+
+	if (sched_governor) {
+		cpumask_andnot(&tmpmask, &p->cpus_allowed, sched_coreidle_mask);
+		if (!cpumask_empty(&tmpmask))
+			cpus_allowed_ptr = &tmpmask;
+	}
+
 	/* Look for allowed, online CPU in same node. */
 	for_each_cpu_and(dest_cpu, nodemask, cpu_active_mask)
-		if (cpumask_test_cpu(dest_cpu, &p->cpus_allowed))
+		if (cpumask_test_cpu(dest_cpu, cpus_allowed_ptr))
 			return dest_cpu;
 
 	/* Any allowed, online CPU? */
-	dest_cpu = cpumask_any_and(&p->cpus_allowed, cpu_active_mask);
+	dest_cpu = cpumask_any_and(cpus_allowed_ptr, cpu_active_mask);
 	if (dest_cpu < nr_cpu_ids)
 		return dest_cpu;
 
@@ -2442,6 +2598,11 @@ static void update_avg(u64 *avg, u64 sample)
 {
 	s64 diff = sample - *avg;
 	*avg += diff >> 3;
+	/*
+	 * HEHUL: FIXME:  avg(k+1) =  avg(k) + (sample(k) - avg(k))/8
+	 * This is weird. better use the following EWMA.
+	 * avg(k+1) = 0.5 * avg(k) + 0.5 * sample(k)
+	 */
 }
 #endif
 
@@ -3478,6 +3639,87 @@ void get_avenrun(unsigned long *loads, unsigned long offset, int shift)
 	loads[2] = (avenrun[2] + offset) << shift;
 }
 
+void coreidle_ondemand_governor(unsigned long load_avg)
+{
+	int i, ncpus = 0;
+	unsigned long weight;
+	int remain;
+	int rq_nr_running = 0;
+	int cfs_nr_running = 0;
+
+	weight = load_avg * 100 / sched_ondemand_target;
+	remain = weight + 1;
+
+	/* consolidate load to maximize energy efficiency */
+	for_each_cpu(i, cpu_online_mask) {
+		if (remain < 0) {
+			cpumask_set_cpu(i, sched_coreidle_mask);
+		} else {
+			remain -= cpu_rq(i)->cpu_power;
+			cpumask_clear_cpu(i, sched_coreidle_mask);
+			ncpus++;
+		}
+		rq_nr_running += cpu_rq(i)->nr_running;
+		cfs_nr_running += cpu_rq(i)->cfs.nr_running;
+	}
+	printk(KERN_DEBUG "ondemand: rq_nr_running=%d, cfs_nr_running=%d, loadavg=%ld, weighted=%ld, ncpus=%d\n",
+	       rq_nr_running, cfs_nr_running, load_avg, weight, ncpus);
+}
+
+#if CONFIG_SCHED_SMT
+/*
+ * Assign core over smt to improve performance.
+ */
+void coreidle_ondemand_smt_governor(unsigned long load_avg)
+{
+	int i, j, ncores, nsmts;
+	unsigned long weight;
+	int remain;
+	int rq_nr_running = 0;
+	int cfs_nr_running = 0;
+
+	struct cpumask smt_mask;
+	cpumask_clear(&smt_mask);
+
+	weight = load_avg * 100 / sched_ondemand_target;
+	remain = weight + 1;
+
+	/* real core first consolidation */
+	ncores = 0;
+	for_each_cpu(i, cpu_online_mask) {
+		rq_nr_running += cpu_rq(i)->nr_running;
+		cfs_nr_running += cpu_rq(i)->cfs.nr_running;
+		if (cpumask_test_cpu(i, &smt_mask)) {
+			cpumask_set_cpu(i, sched_coreidle_mask);
+			continue;
+		}
+		for_each_cpu(j, topology_thread_cpumask(i)) {
+			if (i == j)
+				continue;
+			cpumask_set_cpu(j, &smt_mask);
+		}
+
+		if (remain <= 0) {
+			cpumask_set_cpu(i, sched_coreidle_mask);
+		} else {
+			remain -= cpu_rq(i)->cpu_power;
+			cpumask_clear_cpu(i, sched_coreidle_mask);
+			ncores++;
+		}
+	}
+	nsmts = 0;
+	for_each_cpu(i, &smt_mask) {
+		if (remain <= 0)
+			break;
+		remain -= cpu_rq(i)->cpu_power;
+		cpumask_clear_cpu(i, sched_coreidle_mask);
+		nsmts++;
+	}
+	printk(KERN_DEBUG "ondemand: rq_nr_running=%d, cfs_nr_running=%d, loadavg=%ld, weighted=%ld, ncores=%d, nsmts=%d\n",
+	       rq_nr_running, cfs_nr_running, load_avg, weight, ncores, nsmts);
+}
+#endif /* CONFIG_SCHED_SMT */
+
 /*
  * calc_load - update the avenrun load estimates 10 ticks after the
  * CPUs have updated calc_load_tasks.
@@ -3485,6 +3727,35 @@ void get_avenrun(unsigned long *loads, unsigned long offset, int shift)
 void calc_global_load(unsigned long ticks)
 {
 	long active;
+
+#if USE_COREIDLE_POWERSAVING
+	/* this is called from do_timer() in time/timekeeping.c */
+	if (time_after(jiffies, sched_load_update)) {
+		active = nr_running() * 1024;
+
+		/* was idle longer than period */
+		if (ticks > sched_load_freq) {
+			int i;
+			for (i = 0; i < ticks / sched_load_freq; i++) {
+				CALC_LOAD(sched_load_avg, sched_load_exp, 0);
+				sched_load_update += sched_load_freq;
+			}
+		}
+
+		/* update system output */
+		CALC_LOAD(sched_load_avg, sched_load_exp, active);
+
+		/* ondemand controller impl. */
+		if (sched_governor == COREIDLE_ONDEMAND)
+			coreidle_ondemand_governor(sched_load_avg);
+#if CONFIG_SCHED_SMT
+		else if (sched_governor == COREIDLE_ONDEMAND_SMT)
+			coreidle_ondemand_smt_governor(sched_load_avg);
+#endif
+		/* schedule next invokation */
+		sched_load_update += sched_load_freq;
+	}
+#endif
 
 	calc_global_nohz(ticks);
 
@@ -3592,6 +3863,8 @@ decay_load_missed(unsigned long load, unsigned long missed_updates, int idx)
  * scheduler tick (TICK_NSEC). With tickless idle this will not be called
  * every tick. We fix it up based on jiffies.
  */
+
+
 static void update_cpu_load(struct rq *this_rq)
 {
 	unsigned long this_load = this_rq->load.weight;
@@ -6116,7 +6389,8 @@ static int __migrate_task(struct task_struct *p, int src_cpu, int dest_cpu)
 	if (task_cpu(p) != src_cpu)
 		goto done;
 	/* Affinity changed (again). */
-	if (!cpumask_test_cpu(dest_cpu, &p->cpus_allowed))
+	if (!cpumask_test_cpu(dest_cpu, &p->cpus_allowed) ||
+	    cpumask_test_cpu(dest_cpu, sched_coreidle_mask))
 		goto fail;
 
 	/*
@@ -6911,7 +7185,7 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 }
 
 /* cpus with isolated domains */
-static cpumask_var_t cpu_isolated_map;
+cpumask_var_t cpu_isolated_map;
 
 /* Setup the mask of cpus configured for isolated domains */
 static int __init isolated_cpu_setup(char *str)
@@ -7800,6 +8074,7 @@ int __init sched_create_sysfs_power_savings_entries(struct sysdev_class *cls)
 {
 	int err = 0;
 
+
 #ifdef CONFIG_SCHED_SMT
 	if (smt_capable())
 		err = sysfs_create_file(&cls->kset.kobj,
@@ -7810,6 +8085,10 @@ int __init sched_create_sysfs_power_savings_entries(struct sysdev_class *cls)
 		err = sysfs_create_file(&cls->kset.kobj,
 					&attr_sched_mc_power_savings.attr);
 #endif
+
+	printk(KERN_DEBUG "%s: smt_capable=%d, mc_capable=%d\n", __func__,
+	       smt_capable(), mc_capable());
+
 	return err;
 }
 #endif /* CONFIG_SCHED_MC || CONFIG_SCHED_SMT */
@@ -8179,6 +8458,10 @@ void __init sched_init(void)
 	zalloc_cpumask_var(&nohz_cpu_mask, GFP_NOWAIT);
 #ifdef CONFIG_SMP
 	zalloc_cpumask_var(&sched_domains_tmpmask, GFP_NOWAIT);
+#if USE_COREIDLE_POWERSAVING
+	zalloc_cpumask_var(&sched_coreidle_mask, GFP_NOWAIT);
+	sched_load_update = jiffies + sched_load_freq;
+#endif
 #ifdef CONFIG_NO_HZ
 	zalloc_cpumask_var(&nohz.idle_cpus_mask, GFP_NOWAIT);
 	alloc_cpumask_var(&nohz.grp_idle_mask, GFP_NOWAIT);
