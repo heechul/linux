@@ -3,7 +3,6 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/stop_machine.h>
-
 #include "cpupri.h"
 
 extern __read_mostly int scheduler_running;
@@ -72,6 +71,9 @@ struct rt_bandwidth {
 	raw_spinlock_t		rt_runtime_lock;
 	ktime_t			rt_period;
 	u64			rt_runtime;
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	u64                     rt_runtime_event;
+#endif
 	struct hrtimer		rt_period_timer;
 };
 
@@ -91,6 +93,9 @@ struct cfs_bandwidth {
 	raw_spinlock_t lock;
 	ktime_t period;
 	u64 quota, runtime;
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	u64 quota_event, runtime_event;
+#endif
 	s64 hierarchal_quota;
 	u64 runtime_expires;
 
@@ -187,6 +192,7 @@ extern void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
 extern int sched_group_set_shares(struct task_group *tg, unsigned long shares);
 
 extern void __refill_cfs_bandwidth_runtime(struct cfs_bandwidth *cfs_b);
+extern void __refill_cfs_bandwidth_runtime_event(struct cfs_bandwidth *cfs_b);
 extern void __start_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
 extern void unthrottle_cfs_rq(struct cfs_rq *cfs_rq);
 
@@ -275,7 +281,10 @@ struct cfs_rq {
 	int runtime_enabled;
 	u64 runtime_expires;
 	s64 runtime_remaining;
-
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	int runtime_event_enabled;
+	s64 runtime_event_remaining;
+#endif
 	u64 throttled_timestamp;
 	int throttled, throttle_count;
 	struct list_head throttled_list;

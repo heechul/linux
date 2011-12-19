@@ -213,8 +213,254 @@ static const struct file_operations sched_feat_fops = {
 	.release	= single_release,
 };
 
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+
+DEFINE_PER_CPU(struct perf_event *, sched_ev);
+
+static struct perf_event_attr sched_perf_hw_attr = {
+	.size		= sizeof(struct perf_event_attr),
+	.pinned		= 1,
+	.disabled	= 1,
+};
+
+#define CHW(x) .type = PERF_TYPE_HARDWARE, .config = PERF_COUNT_HW_##x
+#define CSW(x) .type = PERF_TYPE_SOFTWARE, .config = PERF_COUNT_SW_##x
+
+struct event_symbol {
+	u8 type;
+	u64 config;
+	const char *symbol;
+	const char *alias;
+};
+
+static struct event_symbol available_events[] = {
+	{ CSW(CPU_CLOCK),                       "cpu-clock",                    ""                      },
+	{ CHW(CPU_CYCLES),			"cpu-cycles",			"cycles"		},
+	{ CHW(INSTRUCTIONS),			"instructions",			""			},
+	{ CHW(CACHE_MISSES),			"cache-misses",			""			},
+	{ CHW(BUS_CYCLES),			"bus-cycles",			""			},
+};
+
+static int current_event_idx = -1; /* disabled */
+
+static inline u64 __sched_get_event(struct perf_event *event)
+{
+	return local64_read(&event->count) + atomic64_read(&event->child_count);
+}
+
+static inline u64 __sched_read_event(struct perf_event *event)
+{
+	if (event->state == PERF_EVENT_STATE_ACTIVE) {
+		event->pmu->read(event);
+	}
+	return __sched_get_event(event);
+}
+
+u64 sched_get_event(int cpu)
+{
+	struct perf_event *event = per_cpu(sched_ev, cpu);
+	if (!event)
+		return 0;
+	return __sched_get_event(event);
+}
+
+u64 sched_read_event(int cpu)
+{
+	struct perf_event *event = per_cpu(sched_ev, cpu);
+	if (!event) 
+		return 0;
+	return __sched_read_event(event);
+}
+
+static int __enable_event_counter(int cpu, struct event_symbol *req_evt)
+{
+	struct perf_event *event = per_cpu(sched_ev, cpu);
+
+	BUG_ON(!req_evt);
+
+	if (event && event->state > PERF_EVENT_STATE_OFF)
+		goto out;
+	if (event != NULL)
+		goto out_enable;
+
+	/* select based on requested event type */
+	sched_perf_hw_attr.type = req_evt->type;
+	sched_perf_hw_attr.config = req_evt->config;
+	
+	/* Try to register using hardware perf events */
+	event = perf_event_create_kernel_counter(&sched_perf_hw_attr, cpu, NULL, NULL, NULL);
+	if (!IS_ERR(event)) {
+		printk(KERN_INFO "LLC bandwidth throttling enabled. takes one hw-pmu counter.\n");
+		goto out_save;
+	}
+	/* vary the KERN level based on the returned errno */
+	if (PTR_ERR(event) == -EOPNOTSUPP)
+		printk(KERN_INFO "LLC bandwidth throttling (cpu%i): not supported\n", cpu);
+	else if (PTR_ERR(event) == -ENOENT)
+		printk(KERN_WARNING "LLC bandwidth throttling (cpu%i): not h/w event\n", cpu);
+	else
+		printk(KERN_ERR "LLC bandwidth throttling (cpu%i): unable to create perf event: %ld\n", cpu, PTR_ERR(event));
+	return PTR_ERR(event);
+
+	/* success path */
+out_save:
+	per_cpu(sched_ev, cpu) = event;
+out_enable:
+	perf_event_enable(per_cpu(sched_ev, cpu));
+out:
+	return 0;
+}
+
+static int enable_event_counter(struct event_symbol *req_evt)
+{
+	int i;
+	for_each_online_cpu(i)
+		__enable_event_counter(i, req_evt);
+	return 0;
+}
+
+void __disable_event_counter(int cpu)
+{
+	struct perf_event *event = per_cpu(sched_ev, cpu);
+	if (event) {
+		perf_event_disable(event);
+		per_cpu(sched_ev, cpu) = NULL;
+
+		/* should be in cleanup, but blocks oprofile */
+		perf_event_release_kernel(event);
+
+		printk(KERN_INFO "LLC bandwidth throttling disabled");
+	}
+}
+
+static void disable_event_counter(void)
+{
+	int i;
+	for_each_online_cpu(i)
+		__disable_event_counter(i);
+}
+
+static int sched_avail_show(struct seq_file *m, void *v)
+{
+	int i;
+	for (i = 0; i < ARRAY_SIZE(available_events); i++) {
+		seq_printf(m, "%s ", available_events[i].symbol);
+	}
+	seq_printf(m, "\n");
+	return 0;
+}
+
+static int sched_avail_open(struct inode *inode, struct file *filp)
+{
+	return single_open(filp, sched_avail_show, NULL);
+}
+
+static const struct file_operations sched_avail_fops = {
+	.open		= sched_avail_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static ssize_t
+sched_current_write(struct file *filp, const char __user *ubuf,
+		size_t cnt, loff_t *ppos)
+{
+	char buf[64];
+	char *cmp;
+	int i;
+
+	if (cnt > 63)
+		cnt = 63;
+
+	if (copy_from_user(&buf, ubuf, cnt))
+		return -EFAULT;
+
+	buf[cnt] = 0;
+	cmp = strstrip(buf);
+
+	for (i = 0; i < ARRAY_SIZE(available_events); i++) {
+		if (strncmp(available_events[i].symbol, cmp, strlen(cmp)) == 0) {
+			/* matching event is found */
+			if (i != current_event_idx) {
+				/* new entry */
+				current_event_idx = i;
+				disable_event_counter();
+				enable_event_counter(&available_events[i]);
+			}
+			break;
+		}
+	}
+	if (current_event_idx < 0)
+		printk(KERN_DEBUG "no matching event found for %s\n", cmp);
+
+	*ppos += cnt;
+	return cnt;
+}
+
+static int sched_current_show(struct seq_file *m, void *v)
+{
+	if (current_event_idx < 0) 
+		return -1;
+	seq_printf(m, "%s\n", available_events[current_event_idx].symbol);
+	return 0;
+}
+
+static int sched_current_open(struct inode *inode, struct file *filp)
+{
+	return single_open(filp, sched_current_show, NULL);
+}
+
+static const struct file_operations sched_current_fops = {
+	.open		= sched_current_open,
+	.write          = sched_current_write,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int sched_info_show(struct seq_file *m, void *v)
+{
+	int i;
+	if (current_event_idx >= 0 && current_event_idx < ARRAY_SIZE(available_events)) {
+		struct event_symbol *event = &available_events[current_event_idx];
+		seq_printf(m, "%s is enabled\n", event->symbol);
+		seq_printf(m, "values...\n");
+		for_each_online_cpu(i)
+			seq_printf(m, "cpu%02d: %lld\n", i, sched_get_event(i));
+	} else {
+		seq_printf(m, "disabled\n");
+	}
+	return 0;
+}
+
+static int sched_info_open(struct inode *inode, struct file *filp)
+{
+	return single_open(filp, sched_info_show, NULL);
+}
+
+static const struct file_operations sched_info_fops = {
+	.open		= sched_info_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+#endif /* CONFIG_SCHED_EVENT_THROTTLE */
+
 static __init int sched_init_debug(void)
 {
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	struct dentry *throttle_dir;
+	throttle_dir = debugfs_create_dir("sched_throttle", NULL);
+	BUG_ON(!throttle_dir);
+	debugfs_create_file("available_events", 0444, throttle_dir, 
+			    NULL, &sched_avail_fops);
+	debugfs_create_file("current_event", 0666, throttle_dir,
+			    NULL, &sched_current_fops);
+	debugfs_create_file("info", 0444, throttle_dir,
+			    NULL, &sched_info_fops);
+#endif
 	debugfs_create_file("sched_features", 0644, NULL, NULL,
 			&sched_feat_fops);
 
@@ -7515,6 +7761,50 @@ const u64 min_cfs_quota_period = 1 * NSEC_PER_MSEC; /* 1ms */
 
 static int __cfs_schedulable(struct task_group *tg, u64 period, u64 runtime);
 
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+static int tg_set_cfs_event_bandwidth(struct task_group *tg, u64 period, 
+				      u64 quota_event)
+{
+	int i, ret = 0, runtime_event_enabled;
+	struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
+	if (tg == &root_task_group)
+		return -EINVAL;
+	if (period > max_cfs_quota_period)
+		return -EINVAL;
+	if (current_event_idx < 0)
+		return -EINVAL;
+
+	mutex_lock(&cfs_constraints_mutex);
+	runtime_event_enabled = (quota_event != RUNTIME_INF ) ? 1 : 0;
+
+	raw_spin_lock_irq(&cfs_b->lock);
+	cfs_b->period = ns_to_ktime(period);
+	cfs_b->quota_event = quota_event;
+
+	__refill_cfs_bandwidth_runtime_event(cfs_b);
+
+	if (runtime_event_enabled && cfs_b->timer_active) {
+		cfs_b->timer_active = 0;
+		__start_cfs_bandwidth(cfs_b);
+	}
+	raw_spin_unlock_irq(&cfs_b->lock);
+	for_each_possible_cpu(i) {
+		struct cfs_rq *cfs_rq = tg->cfs_rq[i];
+		struct rq *rq = cfs_rq->rq;
+		raw_spin_lock_irq(&rq->lock);
+		cfs_rq->runtime_event_enabled = runtime_event_enabled;
+		cfs_rq->runtime_event_remaining = 0;
+		printk(KERN_DEBUG "cpu%d: cfs_rq(%x)->runtime_event_remaining = %lld\n", 
+		       i, (unsigned int)cfs_rq, cfs_rq->runtime_event_remaining);
+		if (cfs_rq->throttled)
+			unthrottle_cfs_rq(cfs_rq);
+		raw_spin_unlock_irq(&rq->lock);
+	}
+	mutex_unlock(&cfs_constraints_mutex);
+	return ret;
+}
+#endif
+
 static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 {
 	int i, ret = 0, runtime_enabled, runtime_was_enabled;
@@ -7544,8 +7834,8 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 	if (ret)
 		goto out_unlock;
 
-	runtime_enabled = quota != RUNTIME_INF;
-	runtime_was_enabled = cfs_b->quota != RUNTIME_INF;
+	runtime_enabled = (quota != RUNTIME_INF) ? 1 : 0;
+	runtime_was_enabled = (cfs_b->quota != RUNTIME_INF) ? 1 : 0;
 	account_cfs_bandwidth_used(runtime_enabled, runtime_was_enabled);
 	raw_spin_lock_irq(&cfs_b->lock);
 	cfs_b->period = ns_to_ktime(period);
@@ -7567,6 +7857,7 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 		raw_spin_lock_irq(&rq->lock);
 		cfs_rq->runtime_enabled = runtime_enabled;
 		cfs_rq->runtime_remaining = 0;
+		printk(KERN_DEBUG "cpu%d: cfs_rq(%x)->runtime_remaining = %lld\n", i, (unsigned int)cfs_rq, cfs_rq->runtime_remaining);
 
 		if (cfs_rq->throttled)
 			unthrottle_cfs_rq(cfs_rq);
@@ -7581,7 +7872,7 @@ out_unlock:
 int tg_set_cfs_quota(struct task_group *tg, long cfs_quota_us)
 {
 	u64 quota, period;
-
+	
 	period = ktime_to_ns(tg->cfs_bandwidth.period);
 	if (cfs_quota_us < 0)
 		quota = RUNTIME_INF;
@@ -7604,16 +7895,43 @@ long tg_get_cfs_quota(struct task_group *tg)
 	return quota_us;
 }
 
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+int tg_set_cfs_quota_event(struct task_group *tg, long cfs_quota_event)
+{
+	u64 quota_event;
+	u64 period;
+
+	period = ktime_to_ns(tg->cfs_bandwidth.period);
+	if (cfs_quota_event < 0)
+		quota_event = RUNTIME_INF;
+	else
+		quota_event = cfs_quota_event;
+	return tg_set_cfs_event_bandwidth(tg, period, quota_event);
+}
+
+long tg_get_cfs_quota_event(struct task_group *tg)
+{
+	if (tg->cfs_bandwidth.quota_event == RUNTIME_INF)
+		return -1;
+	return tg->cfs_bandwidth.quota_event;
+}
+#endif /* CONFIG_SCHED_EVENT_THROTTLE */
+
 int tg_set_cfs_period(struct task_group *tg, long cfs_period_us)
 {
 	u64 quota, period;
 
+	printk(KERN_DEBUG "%s: cfs_period_us=%ld\n", __FUNCTION__, cfs_period_us);
 	period = (u64)cfs_period_us * NSEC_PER_USEC;
-	quota = tg->cfs_bandwidth.quota;
-
 	if (period <= 0)
 		return -EINVAL;
 
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	quota = tg->cfs_bandwidth.quota_event;
+	if (quota != RUNTIME_INF)
+		return tg_set_cfs_event_bandwidth(tg, period, quota);
+#endif
+	quota = tg->cfs_bandwidth.quota;
 	return tg_set_cfs_bandwidth(tg, period, quota);
 }
 
@@ -7637,6 +7955,19 @@ static int cpu_cfs_quota_write_s64(struct cgroup *cgrp, struct cftype *cftype,
 {
 	return tg_set_cfs_quota(cgroup_tg(cgrp), cfs_quota_us);
 }
+
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+static s64 cpu_cfs_quota_event_read_s64(struct cgroup *cgrp, struct cftype *cft)
+{
+	return tg_get_cfs_quota_event(cgroup_tg(cgrp));
+}
+
+static int cpu_cfs_quota_event_write_s64(struct cgroup *cgrp, struct cftype *cftype,
+					 s64 cfs_quota_event)
+{
+	return tg_set_cfs_quota_event(cgroup_tg(cgrp), cfs_quota_event);
+}
+#endif /* CONFIG_SCHED_EVENT_THROTTLE */
 
 static u64 cpu_cfs_period_read_u64(struct cgroup *cgrp, struct cftype *cft)
 {
@@ -7789,6 +8120,14 @@ static struct cftype cpu_files[] = {
 		.name = "stat",
 		.read_map = cpu_stats_show,
 	},
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	{
+		.name = "cfs_quota_event",
+		.read_s64 = cpu_cfs_quota_event_read_s64,
+		.write_s64 = cpu_cfs_quota_event_write_s64,
+	},
+#endif /* CONFIG_SCHED_EVENT_THROTTLE */
+
 #endif
 #ifdef CONFIG_RT_GROUP_SCHED
 	{
@@ -7801,6 +8140,16 @@ static struct cftype cpu_files[] = {
 		.read_u64 = cpu_rt_period_read_uint,
 		.write_u64 = cpu_rt_period_write_uint,
 	},
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	{
+		.name = "rt_runtime_event",
+#if 0
+		.read_s64 = cpu_rt_runtime_event_read_s64,
+		.write_s64 = cpu_rt_runtime_event_write_s64,
+#endif
+	},
+#endif /* CONFIG_SCHED_EVENT_THROTTLE */
+
 #endif
 };
 
