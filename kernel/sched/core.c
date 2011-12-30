@@ -7794,8 +7794,7 @@ static int tg_set_cfs_event_bandwidth(struct task_group *tg, u64 period,
 		raw_spin_lock_irq(&rq->lock);
 		cfs_rq->runtime_event_enabled = runtime_event_enabled;
 		cfs_rq->runtime_event_remaining = 0;
-		printk(KERN_DEBUG "cpu%d: cfs_rq(%x)->runtime_event_remaining = %lld\n", 
-		       i, (unsigned int)cfs_rq, cfs_rq->runtime_event_remaining);
+		printk(KERN_DEBUG "cpu%d: cfs_rq(%x) event\n", i, (unsigned int)cfs_rq);
 		if (cfs_rq->throttled)
 			unthrottle_cfs_rq(cfs_rq);
 		raw_spin_unlock_irq(&rq->lock);
@@ -7841,7 +7840,12 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 	cfs_b->period = ns_to_ktime(period);
 	cfs_b->quota = quota;
 
+
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	__refill_cfs_bandwidth_runtime_event(cfs_b);
+#else
 	__refill_cfs_bandwidth_runtime(cfs_b);
+#endif
 	/* restart the period timer (if active) to handle new period expiry */
 	if (runtime_enabled && cfs_b->timer_active) {
 		/* force a reprogram */
@@ -7857,7 +7861,7 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 		raw_spin_lock_irq(&rq->lock);
 		cfs_rq->runtime_enabled = runtime_enabled;
 		cfs_rq->runtime_remaining = 0;
-		printk(KERN_DEBUG "cpu%d: cfs_rq(%x)->runtime_remaining = %lld\n", i, (unsigned int)cfs_rq, cfs_rq->runtime_remaining);
+		printk(KERN_DEBUG "cpu%d: cfs_rq(%x) time\n", i, (unsigned int)cfs_rq);
 
 		if (cfs_rq->throttled)
 			unthrottle_cfs_rq(cfs_rq);
@@ -7925,12 +7929,6 @@ int tg_set_cfs_period(struct task_group *tg, long cfs_period_us)
 	period = (u64)cfs_period_us * NSEC_PER_USEC;
 	if (period <= 0)
 		return -EINVAL;
-
-#ifdef CONFIG_SCHED_EVENT_THROTTLE
-	quota = tg->cfs_bandwidth.quota_event;
-	if (quota != RUNTIME_INF)
-		return tg_set_cfs_event_bandwidth(tg, period, quota);
-#endif
 	quota = tg->cfs_bandwidth.quota;
 	return tg_set_cfs_bandwidth(tg, period, quota);
 }

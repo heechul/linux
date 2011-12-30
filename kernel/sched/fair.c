@@ -1525,9 +1525,9 @@ static int assign_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 	expires = cfs_b->runtime_expires;
 	raw_spin_unlock(&cfs_b->lock);
 
+	sched_dbg("%s: cfs_b->runtime=%lld, cfs_rq(0x%x)->runtime_remaining=%lld, amount=%lld\n", __FUNCTION__, cfs_b->runtime, cfs_rq, cfs_rq->runtime_remaining, amount);
 	cfs_rq->runtime_remaining += amount;
 
-	sched_dbg("%s: cfs_rq(%x)->runtime_remaining=%lld, amount=%lld\n", __FUNCTION__, cfs_rq, cfs_rq->runtime_remaining, amount);
 	/*
 	 * we may have advanced our local expiration to account for allowed
 	 * spread between our sched_clock and the one on which runtime was
@@ -1579,7 +1579,7 @@ static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq,
 	/* dock delta_exec before expiring quota (as it could span periods) */
 	cfs_rq->runtime_remaining -= delta_exec;
 
-	sched_dbg("%s: cfs_rq(%x)->runtime_emaining=%lld, delta=%ld\n", __FUNCTION__, cfs_rq, cfs_rq->runtime_remaining, delta_exec);
+	sched_dbg("%s: cfs_rq(0x%x)->runtime_emaining=%lld, delta=%ld\n", __FUNCTION__, cfs_rq, cfs_rq->runtime_remaining, delta_exec);
 
 	expire_cfs_rq_runtime(cfs_rq);
 
@@ -1705,7 +1705,7 @@ static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 	list_add_tail_rcu(&cfs_rq->throttled_list, &cfs_b->throttled_cfs_rq);
 	raw_spin_unlock(&cfs_b->lock);
 
-	sched_dbg( "%s: cfs_rq(%x) dequeue %ld tasks\n", __FUNCTION__, cfs_rq, task_delta);
+	sched_dbg( "%s: cfs_rq(0x%x) dequeue %ld tasks\n", __FUNCTION__, cfs_rq, task_delta);
 }
 
 void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
@@ -1749,7 +1749,7 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 	if (!se)
 		rq->nr_running += task_delta;
 
-	sched_dbg( "%s: cfs_rq(%x) enqueue %ld tasks\n", __FUNCTION__, cfs_rq, task_delta);
+	sched_dbg( "%s: cfs_rq(0x%x) enqueue %ld tasks\n", __FUNCTION__, cfs_rq, task_delta);
 
 	/* determine whether we need to wake up potentially idle cpu */
 	if (rq->curr == rq->idle && rq->cfs.nr_running)
@@ -1803,6 +1803,7 @@ static void distribute_cfs_runtime_event(struct cfs_bandwidth *cfs_b,
 {
 	struct cfs_rq *cfs_rq;
 	u64 runtime, runtime_events;
+	int need_unthrottle = 0;
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(cfs_rq, &cfs_b->throttled_cfs_rq,
@@ -1813,36 +1814,38 @@ static void distribute_cfs_runtime_event(struct cfs_bandwidth *cfs_b,
 		if (!cfs_rq_throttled(cfs_rq))
 			goto next;
 
-		if (cfs_rq->runtime_remaining < 0) {
-			/* throttled due to time */
+		/* throttled due to time */
+		if (cfs_rq->runtime_enabled && cfs_rq->runtime_remaining <= 0) {
 			runtime = -cfs_rq->runtime_remaining + 1;
 			if (runtime > remaining)
 				runtime = remaining;
 			remaining -= runtime;
 			cfs_rq->runtime_remaining += runtime;
-			sched_dbg("%s: cfs_rq(%x)->runtime_remaining=%lld, (cfs_b)runtime=%lld\n", __FUNCTION__, 
+			sched_dbg("%s: cfs_rq(0x%x)->runtime_remaining=%lld, (cfs_b)runtime=%lld\n", __FUNCTION__, 
 				  cfs_rq, cfs_rq->runtime_remaining, 
 				  remaining);
-		} else if (cfs_rq->runtime_event_remaining < 0) {
-			/* throttled due to events */
+			if (cfs_rq->runtime_remaining > 0)
+				need_unthrottle = 1;
+		}
+		/* throttled due to events */
+		if (cfs_rq->runtime_event_enabled && cfs_rq->runtime_event_remaining <= 0) {
 			runtime_events = -cfs_rq->runtime_event_remaining + 1;
 			if (runtime_events > remaining_events)
 				runtime_events = remaining_events;
 			remaining_events -= runtime_events;
 			cfs_rq->runtime_event_remaining += runtime_events;
-			sched_dbg("%s: cfs_rq(%x)->runtime_event_remaining=%lld, (cfs_b)runtime_events=%lld\n", __FUNCTION__, 
+			sched_dbg("%s: cfs_rq(0x%x)->runtime_event_remaining=%lld, (cfs_b)runtime_events=%lld\n", __FUNCTION__, 
 				  cfs_rq, cfs_rq->runtime_event_remaining, 
 				  remaining_events);
-		} else {
-			/* why throttled ?*/
-			printk(KERN_CRIT "Don't know why throttled\n");
-			BUG();
+
+			if (cfs_rq->runtime_event_remaining > 0)
+				need_unthrottle = 1;
 		}
 
 		cfs_rq->runtime_expires = expires;
 
 		/* we check whether we're throttled above */
-		if (cfs_rq->runtime_remaining > 0 || cfs_rq->runtime_event_remaining > 0)
+		if (need_unthrottle)
 			unthrottle_cfs_rq(cfs_rq);
 next:
 		raw_spin_unlock(&rq->lock);
@@ -1852,8 +1855,8 @@ next:
 	}
 	rcu_read_unlock();
 
-	*runtime_ret = remaining;
-	*runtime_event_ret = remaining_events;
+	if (runtime_ret) *runtime_ret = remaining;
+	if (runtime_event_ret) *runtime_event_ret = remaining_events;
 
 	sched_dbg( "%s: remaining=%lld, remaining_event=%lld\n", __FUNCTION__, *runtime_ret, *runtime_event_ret);
 }
@@ -1918,6 +1921,8 @@ static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun)
 	cfs_b->runtime_event = 0;
 
 	while (throttled && (runtime > 0 || runtime_event > 0)) {
+		u64 old_runtime = runtime;
+		u64 old_runtime_event = runtime_event;
 		raw_spin_unlock(&cfs_b->lock);
 		/* we can't nest cfs_b->lock while distributing bandwidth */
 		distribute_cfs_runtime_event(cfs_b, runtime, runtime_event,
@@ -1925,6 +1930,10 @@ static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun)
 		raw_spin_lock(&cfs_b->lock);
 
 		throttled = !list_empty(&cfs_b->throttled_cfs_rq);
+		if (old_runtime == runtime && old_runtime_event == runtime_event) {
+			printk(KERN_ERR "Event quota seems to small. Increase the quota\n");
+			throttled = 0;
+		}
 	}
 	cfs_b->runtime = runtime;
 	cfs_b->runtime_event = runtime_event;
@@ -2033,6 +2042,13 @@ static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 	if (!cfs_rq->runtime_enabled || cfs_rq->nr_running)
 		return;
 
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	/* FIXME: slack redistribution is not yet supported for 
+	   event throttling */
+	if (cfs_rq->runtime_event_enabled)
+		return;
+#endif
+
 	__return_cfs_rq_runtime(cfs_rq);
 }
 
@@ -2059,7 +2075,6 @@ static void do_sched_cfs_slack_timer(struct cfs_bandwidth *cfs_b)
 
 	if (!runtime)
 		return;
-
 	runtime = distribute_cfs_runtime(cfs_b, runtime, expires);
 
 	raw_spin_lock(&cfs_b->lock);
@@ -2095,16 +2110,10 @@ static void check_enqueue_throttle(struct cfs_rq *cfs_rq)
 
 #ifdef CONFIG_SCHED_EVENT_THROTTLE
 	account_cfs_rq_runtime_event(cfs_rq, 0, 0);
-	if (cfs_rq->runtime_enabled && cfs_rq->runtime_remaining <= 0) {
-		if (cfs_rq->runtime_remaining == 0)
-			cfs_rq->runtime_remaining = -1;
+	if (cfs_rq->runtime_enabled && cfs_rq->runtime_remaining <= 0)
 		need_throttle = 1;
-	} 
-	if (cfs_rq->runtime_event_enabled && cfs_rq->runtime_event_remaining <= 0) {
-		if (cfs_rq->runtime_event_remaining == 0)
-			cfs_rq->runtime_event_remaining = -1;
+	if (cfs_rq->runtime_event_enabled && cfs_rq->runtime_event_remaining <= 0)
 		need_throttle = 1;
-	}
 	if (need_throttle)
 		throttle_cfs_rq(cfs_rq);
 #else
@@ -2243,7 +2252,7 @@ void unthrottle_offline_cfs_rqs(struct rq *rq)
 		if (!cfs_rq->runtime_enabled && !cfs_rq->runtime_event_enabled)
 			continue;
 		cfs_rq->runtime_event_remaining = cfs_b->quota_event;
-		sched_dbg("%s: cfs_rq(%x)->runtime_event_remaining=%lld\n", __FUNCTION__, cfs_rq, cfs_rq->runtime_event_remaining);
+		sched_dbg("%s: cfs_rq(0x%x)->runtime_event_remaining=%lld\n", __FUNCTION__, cfs_rq, cfs_rq->runtime_event_remaining);
 #endif
 		/*
 		 * clock_task is not advancing so we just need to make sure
@@ -2308,6 +2317,49 @@ void __refill_cfs_bandwidth_runtime_event(struct cfs_bandwidth *cfs_b)
 	cfs_b->runtime_expires = now + ktime_to_ns(cfs_b->period);
 }
 
+static int assign_cfs_rq_runtime_time(struct cfs_rq *cfs_rq)
+{
+	struct task_group *tg = cfs_rq->tg;
+	struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(tg);
+	u64 amount = 0, min_amount, expires;
+
+	/* note: this is a positive sum as runtime_remaining <= 0 */
+	min_amount = sched_cfs_bandwidth_slice() - cfs_rq->runtime_remaining;
+
+	raw_spin_lock(&cfs_b->lock);
+	if (cfs_b->quota == RUNTIME_INF)
+		amount = min_amount;
+	else {
+		if (!cfs_b->timer_active) {
+			/* refill both time and event since they share a 
+			   same timer */
+			__refill_cfs_bandwidth_runtime_event(cfs_b);
+			__start_cfs_bandwidth(cfs_b);
+		}
+
+		if (cfs_b->runtime > 0) {
+			amount = min(cfs_b->runtime, min_amount);
+			cfs_b->runtime -= amount;
+			cfs_b->idle = 0;
+		}
+	}
+	expires = cfs_b->runtime_expires;
+	raw_spin_unlock(&cfs_b->lock);
+
+	sched_dbg("%s: cfs_b->runtime=%lld, cfs_rq(0x%x)->runtime_remaining=%lld, amount=%lld\n", __FUNCTION__, cfs_b->runtime, cfs_rq, cfs_rq->runtime_remaining, amount);
+	cfs_rq->runtime_remaining += amount;
+
+	/*
+	 * we may have advanced our local expiration to account for allowed
+	 * spread between our sched_clock and the one on which runtime was
+	 * issued.
+	 */
+	if ((s64)(expires - cfs_rq->runtime_expires) > 0)
+		cfs_rq->runtime_expires = expires;
+
+	return cfs_rq->runtime_remaining > 0;
+}
+
 /* returns 0 on failure to allocate runtime */
 static int assign_cfs_rq_runtime_event(struct cfs_rq *cfs_rq)
 {
@@ -2343,8 +2395,8 @@ static int assign_cfs_rq_runtime_event(struct cfs_rq *cfs_rq)
 	expires = cfs_b->runtime_expires;
 	raw_spin_unlock(&cfs_b->lock);
 
+	sched_dbg("%s: cfs_b->runtime_event=%lld, cfs_rq(0x%x)->runtime_event_remaining=%lld, amount=%lld\n", __FUNCTION__, cfs_b->runtime_event, cfs_rq, cfs_rq->runtime_event_remaining, amount);
 	cfs_rq->runtime_event_remaining += amount;
-	sched_dbg("%s: cfs_rq(%x)->runtime_event_remaining=%lld, amount=%lld\n", __FUNCTION__, cfs_rq, cfs_rq->runtime_event_remaining, amount);
 	/*
 	 * we may have advanced our local expiration to account for allowed
 	 * spread between our sched_clock and the one on which runtime was
@@ -2389,15 +2441,14 @@ static void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
 
 	if (cfs_rq->runtime_enabled) 
 		cfs_rq->runtime_remaining -= delta_exec;
-	if (cfs_rq->runtime_event_enabled) {
-		sched_dbg("%s: cfs_rq(%x)->runtime_event_remaining=%lld, delta_event=%ld\n", __FUNCTION__, cfs_rq, cfs_rq->runtime_event_remaining, delta_event);
+	if (cfs_rq->runtime_event_enabled)
 		cfs_rq->runtime_event_remaining -= delta_event;
-	}
+
 	expire_cfs_rq_runtime(cfs_rq);
 
 	if (cfs_rq->runtime_enabled &&
 	    cfs_rq->runtime_remaining <= 0 &&
-	    !assign_cfs_rq_runtime(cfs_rq))
+	    !assign_cfs_rq_runtime_time(cfs_rq))
 		need_throttle = 1;
 
 	if (cfs_rq->runtime_event_enabled && 
@@ -5626,7 +5677,7 @@ static void set_curr_task_fair(struct rq *rq)
 		set_next_entity(cfs_rq, se);
 		/* ensure bandwidth has been allocated on our new cfs_rq */
 
-		sched_dbg("%s: task(%s) on cfs_rq(%x)\n", __FUNCTION__, rq->curr->comm, cfs_rq);
+		sched_dbg("%s: task(%s) on cfs_rq(0x%x)\n", __FUNCTION__, rq->curr->comm, cfs_rq);
 
 #ifdef CONFIG_SCHED_EVENT_THROTTLE
 		account_cfs_rq_runtime_event(cfs_rq, 0, 0);
