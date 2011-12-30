@@ -1,0 +1,94 @@
+Performance counter based throttling for CFS
+============================================
+This extension provides a throttling mechanism based on a number of
+performacne counter (PMU) events occured during a "period" to a control
+group (cgroup). Examples of such events are cache-misses, bus-cycles
+and instructions. For example, a user can specify the maximum number
+of cache misses for every 10 msec.
+
+This extension co-exists with existing CPU throttling
+mechanism. A user can set both event quota, provided by this
+extension, and CPU time quota, existing mechanism. Therefore a 
+control group's resource supply can be expressed as follows.
+
+Periodic resource supply = (Qc, Qe, P)
+ [[where Qc is CPU quota, Qe is event quota, and P is period.]]
+
+Interfaces
+==========
+The period is shared with CFS bandwidth controller as follows 
+
+cpu.cfs_period_us: the length of period (in microseconds)
+
+This extension adds the following interface to the cpu subsystem of
+cgroupfs 
+
+cpu.cfs_quota_event: the total allowed events withing a period
+
+The default value for the quota is -1 which means the group does not
+have any restrictions, i.e., no throttling. 
+
+The type of events is selected via debugfs in a sched_throttle
+directory. This is a global setting affecting all groups in the
+system. 
+
+/sys/kernel/debug/sched_throttle
+	available_events: available performance counter event for
+			  throttling  	 
+	current_event: currently selected counter event
+
+	info: PMU information related to throttling.
+
+Examples
+========
+
+1. Set a cache-miss quota to a group
+
+  Select event type for throttling. 
+
+  # echo cache-misses > /sys/kernel/debug/sched_throttle/current_event
+
+  Create a group 'level2'
+
+  # mount -t cgroup xxx /sys/fs/cgroup
+  # mkdir /sys/fs/cgroup/level2
+  # cd /sys/fs/cgroup/level2
+  # echo 0 > cpuset.cpus
+  # echo 0 > cpuset.mems
+  # echo $$ > tasks	
+
+  Set the period and quota. period is 100ms and the cache-miss event
+  quota is 500000.
+
+  # echo 100000 > cpu.cfs_period_us
+  # echo 500000 > cpu.cfs_quota_event
+
+2. Set a CPU time quota and cache-miss quota
+
+  The group will be throttled either by 30ms CPU time quota is used or
+  500000 cache-misses event quota whichever come first. 
+
+  # echo 100000 > cpu.cfs_period_us
+  # echo  30000 > cpu.cfs_quota_us
+  # echo 500000 > cpu.cfs_quota_event
+
+3. Change event type to instruction count
+
+  Display all available events 
+
+  # cat /sys/kernel/debug/sched_throttle/available_events
+  cpu-clock cpu-cycles instructions cache-misses bus-cycles 
+
+  Display current event counter statistics.
+
+  # cat /sys/kernel/debug/sched_throttle/info
+  cache-misses is enabled
+  values...
+  cpu00: 2147483706
+  cpu01: 572922149
+  cpu02: 2199957594
+  cpu03: 532286267
+
+  Change event type to 'instructions'
+
+  # echo instructions > /sys/kernel/debug/sched_throttle/current_event
