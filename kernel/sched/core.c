@@ -271,8 +271,15 @@ u64 sched_read_event(int cpu)
 		return 0;
 	return __sched_read_event(event);
 }
+static void event_overflow_callback(struct perf_event *event, 
+				    struct perf_sample_data *data, 
+				    struct pt_regs *regs)
+{
+	int cpu = smp_processor_id();
+	resched_cpu(cpu);
+}
 
-static int __enable_event_counter(int cpu, struct event_symbol *req_evt)
+static int __enable_event_counter(int cpu, struct event_symbol *req_evt, u64 sample_period)
 {
 	struct perf_event *event = per_cpu(sched_ev, cpu);
 
@@ -286,9 +293,11 @@ static int __enable_event_counter(int cpu, struct event_symbol *req_evt)
 	/* select based on requested event type */
 	sched_perf_hw_attr.type = req_evt->type;
 	sched_perf_hw_attr.config = req_evt->config;
-	
+
+	sched_perf_hw_attr.sample_period = sample_period;
+
 	/* Try to register using hardware perf events */
-	event = perf_event_create_kernel_counter(&sched_perf_hw_attr, cpu, NULL, NULL, NULL);
+	event = perf_event_create_kernel_counter(&sched_perf_hw_attr, cpu, NULL, event_overflow_callback, NULL);
 	if (!IS_ERR(event)) {
 		printk(KERN_INFO "LLC bandwidth throttling enabled. takes one hw-pmu counter.\n");
 		goto out_save;
@@ -311,11 +320,11 @@ out:
 	return 0;
 }
 
-static int enable_event_counter(struct event_symbol *req_evt)
+static int enable_event_counter(struct event_symbol *req_evt, u64 sample_period)
 {
 	int i;
 	for_each_online_cpu(i)
-		__enable_event_counter(i, req_evt);
+		__enable_event_counter(i, req_evt, sample_period);
 	return 0;
 }
 
@@ -367,7 +376,8 @@ sched_current_write(struct file *filp, const char __user *ubuf,
 		size_t cnt, loff_t *ppos)
 {
 	char buf[64];
-	char *cmp;
+	char *cmp, *num = NULL;
+	u64 sample_period = 0;
 	int i;
 
 	if (cnt > 63)
@@ -378,16 +388,18 @@ sched_current_write(struct file *filp, const char __user *ubuf,
 
 	buf[cnt] = 0;
 	cmp = strstrip(buf);
+	if (num = strchr(buf, ' ')) {
+		*num = 0;
+		sscanf(num + 1, "%lld", &sample_period);
+	}
+	printk(KERN_DEBUG "cmp=%s, num=%lld\n", cmp, sample_period);
 
 	for (i = 0; i < ARRAY_SIZE(available_events); i++) {
 		if (strncmp(available_events[i].symbol, cmp, strlen(cmp)) == 0) {
 			/* matching event is found */
-			if (i != current_event_idx) {
-				/* new entry */
-				current_event_idx = i;
-				disable_event_counter();
-				enable_event_counter(&available_events[i]);
-			}
+			current_event_idx = i;
+			disable_event_counter();
+			enable_event_counter(&available_events[i], sample_period);
 			break;
 		}
 	}
