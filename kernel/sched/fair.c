@@ -418,14 +418,12 @@ find_matching_se(struct sched_entity **se, struct sched_entity **pse)
 
 #endif	/* CONFIG_FAIR_GROUP_SCHED */
 
-static unsigned long get_delta_event(struct cfs_rq *cfs_rq);
 static void account_cfs_rq_runtime(struct cfs_rq *cfs_rq,
 				   unsigned long delta_exec);
 #ifdef CONFIG_SCHED_EVENT_THROTTLE
 void __refill_cfs_bandwidth_runtime_event(struct cfs_bandwidth *cfs_b);
 static int assign_cfs_rq_runtime_event(struct cfs_rq *cfs_rq);
-static unsigned long get_delta_event(struct cfs_rq *cfs_rq);
-static void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
+void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
 					 unsigned long delta_exec,
 					 unsigned long delta_event);
 #endif 
@@ -692,7 +690,7 @@ __update_curr(struct cfs_rq *cfs_rq, struct sched_entity *curr,
 #endif
 }
 
-static void update_curr(struct cfs_rq *cfs_rq)
+void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
 	u64 now = rq_of(cfs_rq)->clock_task;
@@ -723,8 +721,15 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	}
 
 #ifdef CONFIG_SCHED_EVENT_THROTTLE
-	delta_event = get_delta_event(cfs_rq);
-	account_cfs_rq_runtime_event(cfs_rq, delta_exec, delta_event); 
+	if (cfs_rq->runtime_event_enabled) {
+		/* read new value */
+		extern u64 sched_read_event(int cpu);
+		u64 event_now = sched_read_event(cpu_of(rq_of(cfs_rq))); 
+
+		delta_event = event_now - curr->exec_event_start;
+		account_cfs_rq_runtime_event(cfs_rq, delta_exec, delta_event);
+		curr->exec_event_start = event_now;
+	}
 #else
 	account_cfs_rq_runtime(cfs_rq, delta_exec); 
 #endif
@@ -782,15 +787,14 @@ update_stats_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
  * We are picking a new current task - update its stats:
  */
 
-extern u64 sched_get_event(int cpu);
-extern u64 sched_read_event(int cpu);
-
 static inline void
 update_stats_curr_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 #ifdef CONFIG_SCHED_EVENT_THROTTLE
-	if (cfs_rq->runtime_event_enabled)
-		sched_read_event(cpu_of(rq_of(cfs_rq)));
+	if (cfs_rq->runtime_event_enabled) {
+		extern u64 sched_read_event(int cpu);
+		se->exec_event_start = sched_read_event(cpu_of(rq_of(cfs_rq)));
+	}
 #endif
 	/*
 	 * We are starting a new run period:
@@ -1360,7 +1364,7 @@ static struct sched_entity *pick_next_entity(struct cfs_rq *cfs_rq)
 	return se;
 }
 
-static void check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
+void check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 {
@@ -1667,7 +1671,7 @@ static int tg_throttle_down(struct task_group *tg, void *data)
 	return 0;
 }
 
-static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
+void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 {
 	struct rq *rq = rq_of(cfs_rq);
 	struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
@@ -2124,7 +2128,7 @@ static void check_enqueue_throttle(struct cfs_rq *cfs_rq)
 }
 
 /* conditionally throttle active cfs_rq's from put_prev_entity() */
-static void check_cfs_rq_runtime(struct cfs_rq *cfs_rq)
+void check_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 {
 	if (!cfs_bandwidth_used())
 		return;
@@ -2408,28 +2412,7 @@ static int assign_cfs_rq_runtime_event(struct cfs_rq *cfs_rq)
 	return cfs_rq->runtime_event_remaining > 0;
 }
 
-static unsigned long get_delta_event(struct cfs_rq *cfs_rq)
-{
-	/* we assume runtime is enabled  */
-	s64 old, now;
-	unsigned long delta_event;
-
-	if (!cfs_rq->runtime_event_enabled)
-		return 0;
-
-	old = sched_get_event(cpu_of(rq_of(cfs_rq))); /* read prev value */
-	now = sched_read_event(cpu_of(rq_of(cfs_rq))); /* read new value */
-
-	if (now < old) {
-		__WARN_printf("WARN: now < old | %lld, %lld\n", now, old); 
-		return 0;
-	}
-
-	delta_event = (unsigned long)(now - old); /* this is LLC count now  */
-	return delta_event;
-}
-
-static void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
+void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
 					 unsigned long delta_exec, 
 					 unsigned long delta_event)
 {
@@ -2466,7 +2449,6 @@ static void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
 void __refill_cfs_bandwidth_runtime_event(struct cfs_bandwidth *cfs_b) {};
 static void check_cfs_rq_runtime_event(struct cfs_rq *cfs_rq) {}
 static int assign_cfs_rq_runtime_event(struct cfs_rq *cfs_rq) { return 0;}
-static unsigned long get_delta_event(struct cfs_rq *cfs_rq) { return 0;}
 static void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
 					 unsigned long delta_exec,
 					 unsigned long delta_event) {}

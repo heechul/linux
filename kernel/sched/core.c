@@ -276,7 +276,56 @@ static void event_overflow_callback(struct perf_event *event,
 				    struct pt_regs *regs)
 {
 	int cpu = smp_processor_id();
-	resched_cpu(cpu);
+	struct task_struct *p;
+	struct rq *rq = cpu_rq(cpu);
+	struct cfs_rq *cfs_rq;
+
+	extern void throttle_cfs_rq(struct cfs_rq *cfs_rq);
+	extern void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
+					 unsigned long delta_exec, 
+				  unsigned long delta_event);
+
+	extern void update_curr(struct cfs_rq *cfs_rq);
+	extern void check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
+	u64 old, now;
+
+	/* lock rq */
+	raw_spin_lock(&rq->lock);
+	p = rq->curr;
+	if (!p) 
+		goto out;
+	cfs_rq = p->se.cfs_rq;
+
+	/* check elaped */
+	old = p->se.exec_event_start;
+	now = sched_read_event(cpu);
+
+	/* update runtime_event */
+	account_cfs_rq_runtime_event(cfs_rq, 0, (now - old));
+	p->se.exec_event_start = now;
+
+out:
+	/* unlock rq */
+	raw_spin_unlock(&rq->lock);
+
+	if (p && 
+	    cfs_rq->runtime_event_enabled && 
+	    cfs_rq->runtime_event_remaining <= 0 && 
+	    !cfs_rq->throttled) 
+	{
+		// throttle_cfs_rq(cfs_rq);
+		printk(KERN_DEBUG "%s:[%d]%s old=%lld,now=%lld,time=%lld,event=%lld\n", 
+		       "overflow", 
+		       cpu, 
+		       p->comm, 
+		       old, now,
+		       p->se.cfs_rq->runtime_remaining, 
+		       p->se.cfs_rq->runtime_event_remaining );
+
+	}
+
+	/* throttle if runtime_event < 0 */
+	check_cfs_rq_runtime(cfs_rq);
 }
 
 static int __enable_event_counter(int cpu, struct event_symbol *req_evt, u64 sample_period)

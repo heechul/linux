@@ -1186,6 +1186,9 @@ struct sched_entity {
 	u64			vruntime;
 	u64			prev_sum_exec_runtime;
 
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	u64			exec_event_start;
+#endif
 	u64			nr_migrations;
 
 #ifdef CONFIG_SCHEDSTATS
