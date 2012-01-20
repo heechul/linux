@@ -110,6 +110,11 @@ unsigned int __read_mostly sysctl_sched_shares_window = 10000000UL;
  * default: 5 msec, units: microseconds
   */
 unsigned int sysctl_sched_cfs_bandwidth_slice = 5000UL;
+
+/**
+ * Amount of runtime_event to allocate from global (tg) to local (per-cfs_rq) pool
+ */ 
+unsigned int sysctl_sched_cfs_event_bandwidth_slice = 5000; 
 #endif
 
 /*
@@ -1819,33 +1824,32 @@ static void distribute_cfs_runtime_event(struct cfs_bandwidth *cfs_b,
 			goto next;
 
 		/* throttled due to time */
-		if (cfs_rq->runtime_enabled && cfs_rq->runtime_remaining <= 0) {
-			runtime = -cfs_rq->runtime_remaining + 1;
-			if (runtime > remaining)
-				runtime = remaining;
-			remaining -= runtime;
-			cfs_rq->runtime_remaining += runtime;
-			sched_dbg("%s: cfs_rq(0x%x)->runtime_remaining=%lld, (cfs_b)runtime=%lld\n", __FUNCTION__, 
-				  cfs_rq, cfs_rq->runtime_remaining, 
-				  remaining);
-			if (cfs_rq->runtime_remaining > 0)
-				need_unthrottle = 1;
-		}
+		runtime = -cfs_rq->runtime_remaining + 1;
+		if (runtime > remaining)
+			runtime = remaining;
+		remaining -= runtime;
+		cfs_rq->runtime_remaining += runtime;
+		if (cfs_rq->runtime_remaining > 0)
+			need_unthrottle = 1;
+
 		/* throttled due to events */
-		if (cfs_rq->runtime_event_enabled && cfs_rq->runtime_event_remaining <= 0) {
-			runtime_events = -cfs_rq->runtime_event_remaining + 1;
-			if (runtime_events > remaining_events)
-				runtime_events = remaining_events;
-			remaining_events -= runtime_events;
-			cfs_rq->runtime_event_remaining += runtime_events;
-			sched_dbg("%s: cfs_rq(0x%x)->runtime_event_remaining=%lld, (cfs_b)runtime_events=%lld\n", __FUNCTION__, 
-				  cfs_rq, cfs_rq->runtime_event_remaining, 
-				  remaining_events);
+		runtime_events = -cfs_rq->runtime_event_remaining + 1;
+		if (runtime_events > remaining_events)
+			runtime_events = remaining_events;
+		remaining_events -= runtime_events;
+		cfs_rq->runtime_event_remaining += runtime_events;
+		if (cfs_rq->runtime_event_remaining > 0)
+			need_unthrottle = 1;
 
-			if (cfs_rq->runtime_event_remaining > 0)
-				need_unthrottle = 1;
-		}
-
+		sched_dbg("%s: cfs_rq(0x%x), runtime_remaining=%lld, (cfs_b)runtime=%lld\n", 
+			  __FUNCTION__, 
+			  cfs_rq, cfs_rq->runtime_remaining, 
+			  remaining);
+		sched_dbg("%s: cfs_rq(0x%x), runtime_event_remaining=%lld, (cfs_b)runtime_events=%lld\n", 
+			  __FUNCTION__, 
+			  cfs_rq, cfs_rq->runtime_event_remaining, 
+			  remaining_events);
+		
 		cfs_rq->runtime_expires = expires;
 
 		/* we check whether we're throttled above */
@@ -1935,8 +1939,10 @@ static int do_sched_cfs_period_timer(struct cfs_bandwidth *cfs_b, int overrun)
 
 		throttled = !list_empty(&cfs_b->throttled_cfs_rq);
 		if (old_runtime == runtime && old_runtime_event == runtime_event) {
-			printk(KERN_ERR "Event quota seems to small. Increase the quota\n");
+			printk(KERN_ERR "throttled(%d), cfs_b->runtime_event=%lld\n", 
+			       throttled, cfs_b->runtime_event);
 			throttled = 0;
+			break;
 		}
 	}
 	cfs_b->runtime = runtime;
@@ -2364,6 +2370,13 @@ static int assign_cfs_rq_runtime_time(struct cfs_rq *cfs_rq)
 	return cfs_rq->runtime_remaining > 0;
 }
 
+/* FIXME: minimum event quota to be accounted to local. this number is on Core2Quad */
+#define CFS_EVENTCACHE_MISSES_PER_MS (30000)
+static inline u64 sched_cfs_event_bandwidth_slice(void)
+{
+	return (u64) sysctl_sched_cfs_event_bandwidth_slice;
+}
+
 /* returns 0 on failure to allocate runtime */
 static int assign_cfs_rq_runtime_event(struct cfs_rq *cfs_rq)
 {
@@ -2373,7 +2386,7 @@ static int assign_cfs_rq_runtime_event(struct cfs_rq *cfs_rq)
 
 	/* note: this is a positive sum as runtime_remaining <= 0 */
 	/* FIXME: for now. assign quota on-demand basis */
-	min_amount = -cfs_rq->runtime_event_remaining;
+	min_amount = sched_cfs_event_bandwidth_slice() - cfs_rq->runtime_event_remaining;
 
 	raw_spin_lock(&cfs_b->lock);
 	if (cfs_b->quota_event == RUNTIME_INF)

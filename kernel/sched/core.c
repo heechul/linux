@@ -234,11 +234,11 @@ struct event_symbol {
 };
 
 static struct event_symbol available_events[] = {
-	{ CSW(CPU_CLOCK),                       "cpu-clock",                    ""                      },
-	{ CHW(CPU_CYCLES),			"cpu-cycles",			"cycles"		},
-	{ CHW(INSTRUCTIONS),			"instructions",			""			},
-	{ CHW(CACHE_MISSES),			"cache-misses",			""			},
-	{ CHW(BUS_CYCLES),			"bus-cycles",			""			},
+	{ CSW(CPU_CLOCK),    "cpu-clock",    ""                 },
+	{ CHW(CPU_CYCLES),   "cpu-cycles",   "cycles"		},
+	{ CHW(INSTRUCTIONS), "instructions", ""			},
+	{ CHW(CACHE_MISSES), "cache-misses", ""			},
+	{ CHW(BUS_CYCLES),   "bus-cycles",   ""			},
 };
 
 static int current_event_idx = -1; /* disabled */
