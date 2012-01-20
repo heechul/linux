@@ -2372,8 +2372,8 @@ static int assign_cfs_rq_runtime_event(struct cfs_rq *cfs_rq)
 	u64 amount = 0, min_amount, expires;
 
 	/* note: this is a positive sum as runtime_remaining <= 0 */
-	/* FIXME: for now. first core get all the events quota */
-	min_amount = cfs_b->quota_event/2 - cfs_rq->runtime_event_remaining;
+	/* FIXME: for now. assign quota on-demand basis */
+	min_amount = -cfs_rq->runtime_event_remaining;
 
 	raw_spin_lock(&cfs_b->lock);
 	if (cfs_b->quota_event == RUNTIME_INF)
