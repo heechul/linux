@@ -277,43 +277,44 @@ static void event_overflow_callback(struct perf_event *event,
 {
 	int cpu = smp_processor_id();
 	struct task_struct *p;
-	struct rq *rq = cpu_rq(cpu);
+	struct rq *rq = this_rq();
 	struct cfs_rq *cfs_rq;
-
-	extern void throttle_cfs_rq(struct cfs_rq *cfs_rq);
-	extern void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
-					 unsigned long delta_exec, 
-				  unsigned long delta_event);
-
-	extern void update_curr(struct cfs_rq *cfs_rq);
-	extern void check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 	u64 old, now;
 
-	/* lock rq */
-	raw_spin_lock(&rq->lock);
+	/* lock rq. if failed report error and return */
+	if (!raw_spin_trylock(&rq->lock)) {
+		// printk(KERN_ERR "%s: rq->lock is already held. return\n", __FUNCTION__);
+		return;
+	}
+
+	/* now we update task and it's cfs_rq */
 	p = rq->curr;
-	if (!p) 
-		goto out;
 	cfs_rq = p->se.cfs_rq;
 
-	/* check elaped */
-	old = p->se.exec_event_start;
-	now = sched_read_event(cpu);
+	/* we only care cfs for now */
+	if (!cfs_rq) {
+		printk(KERN_ERR "%s: not a cfs task \n", __FUNCTION__);
+		return;
+	}
 
 	/* update runtime_event */
+	now = sched_read_event(cpu);
+	old = p->se.exec_event_start;
 	account_cfs_rq_runtime_event(cfs_rq, 0, (now - old));
-	p->se.exec_event_start = now;
+	p->se.exec_event_start = now;  
 
-out:
+	/* throttle if runtime_event < 0 */
+	check_cfs_rq_runtime(cfs_rq);
+
 	/* unlock rq */
 	raw_spin_unlock(&rq->lock);
 
+	/* debug stuff */
 	if (p && 
 	    cfs_rq->runtime_event_enabled && 
 	    cfs_rq->runtime_event_remaining <= 0 && 
 	    !cfs_rq->throttled) 
 	{
-		// throttle_cfs_rq(cfs_rq);
 		printk(KERN_DEBUG "%s:[%d]%s old=%lld,now=%lld,time=%lld,event=%lld\n", 
 		       "overflow", 
 		       cpu, 
@@ -323,9 +324,6 @@ out:
 		       p->se.cfs_rq->runtime_event_remaining );
 
 	}
-
-	/* throttle if runtime_event < 0 */
-	check_cfs_rq_runtime(cfs_rq);
 }
 
 static int __enable_event_counter(int cpu, struct event_symbol *req_evt, u64 sample_period)

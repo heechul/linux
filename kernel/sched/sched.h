@@ -196,6 +196,13 @@ extern void __refill_cfs_bandwidth_runtime_event(struct cfs_bandwidth *cfs_b);
 extern void __start_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
 extern void unthrottle_cfs_rq(struct cfs_rq *cfs_rq);
 
+extern void throttle_cfs_rq(struct cfs_rq *cfs_rq);
+extern void account_cfs_rq_runtime_event(struct cfs_rq *cfs_rq,
+					 unsigned long delta_exec, 
+					 unsigned long delta_event);
+
+extern void check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
+
 extern void free_rt_sched_group(struct task_group *tg);
 extern int alloc_rt_sched_group(struct task_group *tg, struct task_group *parent);
 extern void init_tg_rt_entry(struct task_group *tg, struct rt_rq *rt_rq,
