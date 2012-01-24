@@ -2370,8 +2370,7 @@ static int assign_cfs_rq_runtime_time(struct cfs_rq *cfs_rq)
 	return cfs_rq->runtime_remaining > 0;
 }
 
-/* FIXME: minimum event quota to be accounted to local. this number is on Core2Quad */
-#define CFS_EVENTCACHE_MISSES_PER_MS (30000)
+/* minimum event quota to be accounted to local. */
 static inline u64 sched_cfs_event_bandwidth_slice(void)
 {
 	return (u64) sysctl_sched_cfs_event_bandwidth_slice;

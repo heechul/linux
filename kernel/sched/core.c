@@ -267,63 +267,27 @@ u64 sched_get_event(int cpu)
 u64 sched_read_event(int cpu)
 {
 	struct perf_event *event = per_cpu(sched_ev, cpu);
-	if (!event) 
+	if (!event)
 		return 0;
 	return __sched_read_event(event);
 }
-static void event_overflow_callback(struct perf_event *event, 
-				    struct perf_sample_data *data, 
+static void event_overflow_callback(struct perf_event *event,
+				    struct perf_sample_data *data,
 				    struct pt_regs *regs)
 {
-	int cpu = smp_processor_id();
-	struct task_struct *p;
 	struct rq *rq = this_rq();
-	struct cfs_rq *cfs_rq;
-	u64 old, now;
+	unsigned long flags;
 
-	/* lock rq. if failed report error and return */
-	if (!raw_spin_trylock(&rq->lock)) {
-		// printk(KERN_ERR "%s: rq->lock is already held. return\n", __FUNCTION__);
-		return;
-	}
+	/* disable interrupt. PMU interrup is slow interrupt? */
+	local_irq_save(flags);
 
-	/* now we update task and it's cfs_rq */
-	p = rq->curr;
-	cfs_rq = p->se.cfs_rq;
-
-	/* we only care cfs for now */
-	if (!cfs_rq) {
-		printk(KERN_ERR "%s: not a cfs task \n", __FUNCTION__);
-		return;
-	}
-
-	/* update runtime_event */
-	now = sched_read_event(cpu);
-	old = p->se.exec_event_start;
-	account_cfs_rq_runtime_event(cfs_rq, 0, (now - old));
-	p->se.exec_event_start = now;  
-
-	/* throttle if runtime_event < 0 */
-	check_cfs_rq_runtime(cfs_rq);
-
-	/* unlock rq */
+	raw_spin_lock(&rq->lock);
+	update_rq_clock(rq);
+	rq->curr->sched_class->task_tick(rq, rq->curr, 0);
 	raw_spin_unlock(&rq->lock);
 
-	/* debug stuff */
-	if (p && 
-	    cfs_rq->runtime_event_enabled && 
-	    cfs_rq->runtime_event_remaining <= 0 && 
-	    !cfs_rq->throttled) 
-	{
-		printk(KERN_DEBUG "%s:[%d]%s old=%lld,now=%lld,time=%lld,event=%lld\n", 
-		       "overflow", 
-		       cpu, 
-		       p->comm, 
-		       old, now,
-		       p->se.cfs_rq->runtime_remaining, 
-		       p->se.cfs_rq->runtime_event_remaining );
-
-	}
+	/* enable interrupt */
+	local_irq_restore(flags);
 }
 
 static int __enable_event_counter(int cpu, struct event_symbol *req_evt, u64 sample_period)
@@ -7815,8 +7779,8 @@ static u64 cpu_shares_read_u64(struct cgroup *cgrp, struct cftype *cft)
 #ifdef CONFIG_CFS_BANDWIDTH
 static DEFINE_MUTEX(cfs_constraints_mutex);
 
-const u64 max_cfs_quota_period = 1 * NSEC_PER_SEC; /* 1s */
-const u64 min_cfs_quota_period = 1 * NSEC_PER_MSEC; /* 1ms */
+const u64 max_cfs_quota_period = 10 * NSEC_PER_SEC; /* 10s */
+const u64 min_cfs_quota_period = 100 * NSEC_PER_USEC; /* 100us */
 
 static int __cfs_schedulable(struct task_group *tg, u64 period, u64 runtime);
 
