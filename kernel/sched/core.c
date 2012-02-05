@@ -275,19 +275,25 @@ static void event_overflow_callback(struct perf_event *event,
 				    struct perf_sample_data *data,
 				    struct pt_regs *regs)
 {
-	struct rq *rq = this_rq();
+	struct rq *rq;
 	unsigned long flags;
+	struct hw_perf_event *hwc = &event->hw;
 
+	rq = this_rq();
+	WARN_ON(!rq || !rq->curr);
+	// event->pmu->stop(event, PERF_EF_UPDATE); 
+							  
 	/* disable interrupt. PMU interrup is slow interrupt? */
-	local_irq_save(flags);
-
-	raw_spin_lock(&rq->lock);
+	if (!raw_spin_trylock_irqsave(&rq->lock, flags))
+		return;
 	update_rq_clock(rq);
 	rq->curr->sched_class->task_tick(rq, rq->curr, 0);
-	raw_spin_unlock(&rq->lock);
 
 	/* enable interrupt */
-	local_irq_restore(flags);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
+
+	// local64_set(&hwc->period_left, 0);
+	// event->pmu->start(event, PERF_EF_RELOAD); // <- start period timer.
 }
 
 static int __enable_event_counter(int cpu, struct event_symbol *req_evt, u64 sample_period)
@@ -312,7 +318,12 @@ static int __enable_event_counter(int cpu, struct event_symbol *req_evt, u64 sam
 	if (!IS_ERR(event)) {
 		printk(KERN_INFO "LLC bandwidth throttling enabled. takes one hw-pmu counter.\n");
 		goto out_save;
+	} else {
+		/* debug only. */
+		printk(KERN_INFO "DBG: hw=0x%x, fasync=0x%x, overflow=0x%x\n", 
+		       event->hw, event->fasync, event->overflow_handler);
 	}
+
 	/* vary the KERN level based on the returned errno */
 	if (PTR_ERR(event) == -EOPNOTSUPP)
 		printk(KERN_INFO "LLC bandwidth throttling (cpu%i): not supported\n", cpu);
@@ -7779,8 +7790,8 @@ static u64 cpu_shares_read_u64(struct cgroup *cgrp, struct cftype *cft)
 #ifdef CONFIG_CFS_BANDWIDTH
 static DEFINE_MUTEX(cfs_constraints_mutex);
 
-const u64 max_cfs_quota_period = 10 * NSEC_PER_SEC; /* 10s */
-const u64 min_cfs_quota_period = 100 * NSEC_PER_USEC; /* 100us */
+const u64 max_cfs_quota_period = 2 * NSEC_PER_SEC; /* 2s */
+const u64 min_cfs_quota_period = 200 * NSEC_PER_USEC; /* 200us */
 
 static int __cfs_schedulable(struct task_group *tg, u64 period, u64 runtime);
 
