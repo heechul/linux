@@ -114,7 +114,7 @@ unsigned int sysctl_sched_cfs_bandwidth_slice = 5000UL;
 /**
  * Amount of runtime_event to allocate from global (tg) to local (per-cfs_rq) pool
  */ 
-unsigned int sysctl_sched_cfs_event_bandwidth_slice = 5000; 
+unsigned int sysctl_sched_cfs_event_bandwidth_slice = 1000; 
 #endif
 
 /*
