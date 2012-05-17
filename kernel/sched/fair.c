@@ -797,6 +797,16 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		update_load_sub(&rq_of(cfs_rq)->load, se->load.weight);
 	if (entity_is_task(se))
 		list_del_init(&se->group_node);
+	
+	if (cfs_rq->nr_running == 0) {
+		__WARN();
+		trace_printk("dequeue on empty cfs_rq. se(%s,%d)\n",
+			     task_of(se)->comm, 
+			     task_of(se)->pid);
+		dump_stack();
+		return; /* don't mess up nr_running */
+	}
+
 	cfs_rq->nr_running--;
 }
 
@@ -2241,7 +2251,8 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		*/
 		if (cfs_rq_throttled(cfs_rq))
 			break;
-		cfs_rq->h_nr_running--;
+		if (likely(cfs_rq->h_nr_running > 0))
+			cfs_rq->h_nr_running--;
 
 		/* Don't dequeue parent if it has other entities besides us */
 		if (cfs_rq->load.weight) {
@@ -2261,7 +2272,8 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
-		cfs_rq->h_nr_running--;
+		if (likely(cfs_rq->h_nr_running > 0))
+			cfs_rq->h_nr_running--;
 
 		if (cfs_rq_throttled(cfs_rq))
 			break;
