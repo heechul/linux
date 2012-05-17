@@ -1712,7 +1712,9 @@ static void __sched_fork(struct task_struct *p)
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
 	INIT_LIST_HEAD(&p->se.group_node);
-
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	INIT_LIST_HEAD(&p->se.throttle_node);
+#endif
 #ifdef CONFIG_SCHEDSTATS
 	memset(&p->se.statistics, 0, sizeof(p->se.statistics));
 #endif
@@ -7809,24 +7811,6 @@ static int __cfs_schedulable(struct task_group *tg, u64 period, u64 runtime);
 
 #include <linux/slab.h>
 static DEFINE_PER_CPU(struct list_head, tq_list);
-struct tq_item {
-        struct task_struct *p;
-        struct list_head task_list;
-};
-static struct kmem_cache *tq_cachep = NULL;
-
-void tq_cache_init(void)
-{
-        tq_cachep = kmem_cache_create(
-                "throttle_cache",
-                sizeof(struct tq_item),
-                0, /* alignment */
-                SLAB_PANIC, /* flags */
-                NULL);
-
-        printk(KERN_INFO "cache %s is created\n", 
-               (tq_cachep->name) ? tq_cachep->name: "NULL");
-}
 
 /**
  * throttle tasks on a specific cpu
@@ -7842,7 +7826,7 @@ int throttle_rq_cpu(int cpu)
         struct rq *rq ;
         struct cfs_rq *cfs_rq;
         unsigned long flags;
-        struct task_struct *g, *p;
+        struct task_struct *q, *p;
         struct list_head *head = &per_cpu(tq_list, cpu);
         int throttle_cnt = 0;
 
@@ -7856,32 +7840,20 @@ int throttle_rq_cpu(int cpu)
         }
 
         INIT_LIST_HEAD(head);
-        list_for_each_entry_safe(p, g, &rq->cfs_tasks, se.group_node) {
-                struct tq_item *item;
-
+        list_for_each_entry_safe(p, q, &rq->cfs_tasks, se.group_node) {
                 /* do not touch time sensitive kernel threads e.g., softirqd */
                 if (p->flags & PF_WQ_WORKER) /* let's not touch workers */
                         continue;
 
-                /* add to throttled list */
-                item = (struct tq_item *)kmem_cache_alloc(tq_cachep,
-                                                          GFP_ATOMIC);
-
-                if (unlikely(item == NULL)) {
-                        trace_printk("ERR: alloc failed.\n");
-                        goto out;
-                }
                 /*
                  * dequeue the task
                  *   cfs_rq->h_nr_running-- && rq->nr_running-- is done here
                  *   ->dequeue_task_fair()
                  */
                 if (p->on_rq) {
-                        item->p = p;
-                        INIT_LIST_HEAD(&item->task_list);
-                        list_add(&item->task_list, head);
+			/* add to throttled list */
+                        list_add(&p->se.throttle_node, head);
                         throttle_cnt++;
-
                         deactivate_task(rq, p, DEQUEUE_SLEEP);
                         p->on_rq = 0;
                         trace_printk(" p%d(%s,%d)\n", throttle_cnt, p->comm, p->pid);
@@ -7892,7 +7864,6 @@ int throttle_rq_cpu(int cpu)
         }
 
         resched_task(cpu_curr(cpu));
-out:
         /* TODO: handle realtime class */
         raw_spin_unlock_irqrestore(&rq->lock, flags);
         return throttle_cnt;
@@ -7902,7 +7873,7 @@ int unthrottle_rq_cpu(int cpu)
 {
         struct rq *rq ;
         unsigned long flags;
-        struct tq_item *item, *q;
+        struct task_struct *q, *p;
         struct list_head *head = &per_cpu(tq_list, cpu);
         int unthrottle_cnt = 0;
 
@@ -7912,22 +7883,18 @@ int unthrottle_rq_cpu(int cpu)
                 return -1;
         }
 
-        list_for_each_entry_safe(item, q, head, task_list) {
-                BUG_ON(item == NULL || item->p == NULL);
-                /* WARN_ON(item->p->on_rq); */
-                /* WARN_ON(task_cpu(item->p) != cpu ); */
-                /* HEECHUL */
-                if (!item->p->on_rq) {
-                        activate_task(rq, item->p, ENQUEUE_WAKEUP);
-                        item->p->on_rq = 1;
+        list_for_each_entry_safe(p, q, head, se.throttle_node) {
+                BUG_ON(p == NULL);
+                if (!p->on_rq) {
+                        activate_task(rq, p, ENQUEUE_WAKEUP);
+                        p->on_rq = 1;
                 } else {
                         trace_printk("ERR: (%s,%d) is on %d\n",
-                                item->p->comm, item->p->pid, task_cpu(item->p));
+				     p->comm, p->pid, task_cpu(p));
                 }
-                list_del_init(&item->task_list);
+                list_del_init(&p->se.throttle_node);
                 unthrottle_cnt++;
-                trace_printk(" p%d(%s,%d)\n", unthrottle_cnt, item->p->comm, item->p->pid);
-                kmem_cache_free(tq_cachep, item);
+                trace_printk(" p%d(%s,%d)\n", unthrottle_cnt, p->comm, p->pid);
         }
 
         resched_task(cpu_curr(cpu));
