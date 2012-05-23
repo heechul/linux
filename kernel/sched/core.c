@@ -249,11 +249,52 @@ static const struct file_operations sched_feat_fops = {
 	.release	= single_release,
 };
 
+static ssize_t sched_coreidle_write(struct file *filp, const char __user *ubuf,
+				    size_t cnt, loff_t *ppos)
+{
+	char buf[64];
+
+	if (cnt > 63) cnt = 63;
+	if (copy_from_user(&buf, ubuf, cnt))
+		return -EFAULT;
+
+	cpumask_clear(sched_coreidle_mask);
+	cpulist_parse(buf, sched_coreidle_mask);
+	cpulist_scnprintf(buf, 64, sched_coreidle_mask);
+	printk(KERN_DEBUG "sched_userspace: %s\n", buf);
+	
+	*ppos += cnt;
+	return cnt;
+}
+
+static int sched_coreidle_show(struct seq_file *m, void *v)
+{
+	char buf[512];
+	seq_printf(m, "coreidle_mask:");
+	cpulist_scnprintf(buf, sizeof(buf), sched_coreidle_mask);
+	seq_printf(m, "%s\n", buf);
+	return 0;
+}
+static int sched_coreidle_open(struct inode *inode, struct file *filp)
+{
+	return single_open(filp, sched_coreidle_show, NULL);
+}
+
+static const struct file_operations sched_coreidle_fops = {
+	.open		= sched_coreidle_open,
+	.write          = sched_coreidle_write,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 static __init int sched_init_debug(void)
 {
 	debugfs_create_file("sched_features", 0644, NULL, NULL,
 			&sched_feat_fops);
 
+	debugfs_create_file("coreidle", 0644, NULL, NULL,
+			    &sched_coreidle_fops);
 	return 0;
 }
 late_initcall(sched_init_debug);
@@ -1272,6 +1313,8 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 		if (!cpu_online(dest_cpu))
 			continue;
 		if (!cpu_active(dest_cpu))
+			continue;
+		if (cpumask_test_cpu(dest_cpu, sched_coreidle_mask))
 			continue;
 		if (cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p)))
 			return dest_cpu;
@@ -5916,6 +5959,8 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 /* cpus with isolated domains */
 static cpumask_var_t cpu_isolated_map;
 
+cpumask_var_t sched_coreidle_mask;
+
 /* Setup the mask of cpus configured for isolated domains */
 static int __init isolated_cpu_setup(char *str)
 {
@@ -7167,6 +7212,8 @@ void __init sched_init(void)
 
 #ifdef CONFIG_SMP
 	zalloc_cpumask_var(&sched_domains_tmpmask, GFP_NOWAIT);
+	zalloc_cpumask_var(&sched_coreidle_mask, GFP_NOWAIT);
+
 	/* May be allocated at isolcpus cmdline parse time */
 	if (cpu_isolated_map == NULL)
 		zalloc_cpumask_var(&cpu_isolated_map, GFP_NOWAIT);

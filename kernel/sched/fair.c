@@ -2576,6 +2576,10 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 	unsigned long min_load = ULONG_MAX, this_load = 0;
 	int imbalance = 100 + (sd->imbalance_pct-100)/2;
 
+	struct cpumask cpus_allowed;
+	cpumask_andnot(&cpus_allowed, tsk_cpus_allowed(p), 
+		       sched_coreidle_mask);
+
 	do {
 		unsigned long load, avg_load;
 		int local_group;
@@ -2583,7 +2587,7 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 
 		/* Skip over this group if it has no CPUs allowed */
 		if (!cpumask_intersects(sched_group_cpus(group),
-					tsk_cpus_allowed(p)))
+					&cpus_allowed))
 			continue;
 
 		local_group = cpumask_test_cpu(this_cpu,
@@ -2628,8 +2632,12 @@ find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
 	int idlest = -1;
 	int i;
 
+	struct cpumask cpus_allowed;
+	cpumask_andnot(&cpus_allowed, tsk_cpus_allowed(p), 
+		       sched_coreidle_mask);
+
 	/* Traverse only the allowed CPUs */
-	for_each_cpu_and(i, sched_group_cpus(group), tsk_cpus_allowed(p)) {
+	for_each_cpu_and(i, sched_group_cpus(group), &cpus_allowed) {
 		load = weighted_cpuload(i);
 
 		if (load < min_load || (load == min_load && i == this_cpu)) {
@@ -2651,6 +2659,10 @@ static int select_idle_sibling(struct task_struct *p, int target)
 	struct sched_domain *sd;
 	struct sched_group *sg;
 	int i;
+
+	struct cpumask cpus_allowed;
+	cpumask_andnot(&cpus_allowed, tsk_cpus_allowed(p), 
+		       sched_coreidle_mask);
 
 	/*
 	 * If the task is going to be woken-up on this cpu and if it is
@@ -2674,7 +2686,7 @@ static int select_idle_sibling(struct task_struct *p, int target)
 		sg = sd->groups;
 		do {
 			if (!cpumask_intersects(sched_group_cpus(sg),
-						tsk_cpus_allowed(p)))
+						&cpus_allowed))
 				goto next;
 
 			for_each_cpu(i, sched_group_cpus(sg)) {
@@ -2683,7 +2695,7 @@ static int select_idle_sibling(struct task_struct *p, int target)
 			}
 
 			target = cpumask_first_and(sched_group_cpus(sg),
-					tsk_cpus_allowed(p));
+					&cpus_allowed);
 			goto done;
 next:
 			sg = sg->next;
@@ -2715,11 +2727,15 @@ select_task_rq_fair(struct task_struct *p, int sd_flag, int wake_flags)
 	int want_sd = 1;
 	int sync = wake_flags & WF_SYNC;
 
+	struct cpumask cpus_allowed;
+	cpumask_andnot(&cpus_allowed, tsk_cpus_allowed(p), 
+		       sched_coreidle_mask);
+
 	if (p->rt.nr_cpus_allowed == 1)
 		return prev_cpu;
 
 	if (sd_flag & SD_BALANCE_WAKE) {
-		if (cpumask_test_cpu(cpu, tsk_cpus_allowed(p)))
+		if (cpumask_test_cpu(cpu, &cpus_allowed))
 			want_affine = 1;
 		new_cpu = prev_cpu;
 	}
@@ -3153,13 +3169,17 @@ static
 int can_migrate_task(struct task_struct *p, struct lb_env *env)
 {
 	int tsk_cache_hot = 0;
+	struct cpumask cpus_allowed;
+	cpumask_andnot(&cpus_allowed, tsk_cpus_allowed(p), 
+		       sched_coreidle_mask);
+
 	/*
 	 * We do not migrate tasks that are:
 	 * 1) running (obviously), or
 	 * 2) cannot be migrated to this CPU due to cpus_allowed, or
 	 * 3) are cache-hot on their current CPU.
 	 */
-	if (!cpumask_test_cpu(env->dst_cpu, tsk_cpus_allowed(p))) {
+	if (!cpumask_test_cpu(env->dst_cpu, &cpus_allowed)) {
 		schedstat_inc(p, se.statistics.nr_failed_migrations_affine);
 		return 0;
 	}
@@ -4422,7 +4442,9 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 		.loop_break	= sched_nr_migrate_break,
 	};
 
-	cpumask_copy(cpus, cpu_active_mask);
+	if (cpumask_test_cpu(this_cpu, sched_coreidle_mask))
+		goto out;
+	cpumask_andnot(cpus, cpu_active_mask, sched_coreidle_mask);
 
 	schedstat_inc(sd, lb_count[idle]);
 
@@ -4588,6 +4610,9 @@ void idle_balance(int this_cpu, struct rq *this_rq)
 	this_rq->idle_stamp = this_rq->clock;
 
 	if (this_rq->avg_idle < sysctl_sched_migration_cost)
+		return;
+
+	if (cpumask_test_cpu(this_cpu, sched_coreidle_mask))
 		return;
 
 	/*
@@ -5022,6 +5047,8 @@ static void nohz_idle_balance(int this_cpu, enum cpu_idle_type idle)
 		if (balance_cpu == this_cpu || !idle_cpu(balance_cpu))
 			continue;
 
+		if (cpumask_test_cpu(balance_cpu, sched_coreidle_mask))
+                       continue;
 		/*
 		 * If this cpu gets work to do, stop the load balancing
 		 * work being done for other cpus. Next load
