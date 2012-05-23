@@ -7880,6 +7880,8 @@ int throttle_rq_cpu(int cpu)
         rq = cpu_rq(cpu);
         cfs_rq = &rq->cfs; /* no cgroup support */
 
+	/* to prevent migration to this throttled core */
+	cpumask_set_cpu(cpu, sched_coreidle_mask); 
 
         if (!raw_spin_trylock_irqsave(&rq->lock, flags)) {
                 trace_printk("failed to get rq->lock\n");
@@ -7929,6 +7931,9 @@ int unthrottle_rq_cpu(int cpu)
                 trace_printk("failed to get rq->lock\n");
                 return -1;
         }
+
+	/* to re-enable migration to this core */
+	cpumask_clear_cpu(cpu, sched_coreidle_mask); 
 
         list_for_each_entry_safe(p, q, head, se.throttle_node) {
                 BUG_ON(p == NULL);
