@@ -7891,7 +7891,7 @@ int throttle_rq_cpu(int cpu)
         INIT_LIST_HEAD(head);
         list_for_each_entry_safe(p, q, &rq->cfs_tasks, se.group_node) {
                 /* do not touch time sensitive kernel threads e.g., softirqd */
-                if (p->flags & PF_WQ_WORKER) /* let's not touch workers */
+                if (!p->mm) /* let's not touch kernel threads */
                         continue;
 
                 /*
