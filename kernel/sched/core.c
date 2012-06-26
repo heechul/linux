@@ -87,6 +87,8 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 
+static DEFINE_PER_CPU(struct list_head, tq_list);
+
 void start_bandwidth_timer(struct hrtimer *period_timer, ktime_t period)
 {
 	unsigned long delta;
@@ -262,7 +264,7 @@ static ssize_t sched_coreidle_write(struct file *filp, const char __user *ubuf,
 	cpulist_parse(buf, sched_coreidle_mask);
 	cpulist_scnprintf(buf, 64, sched_coreidle_mask);
 	printk(KERN_DEBUG "sched_userspace: %s\n", buf);
-	
+
 	*ppos += cnt;
 	return cnt;
 }
@@ -270,9 +272,22 @@ static ssize_t sched_coreidle_write(struct file *filp, const char __user *ubuf,
 static int sched_coreidle_show(struct seq_file *m, void *v)
 {
 	char buf[512];
+	int i;
+	struct task_struct *p;
+
 	seq_printf(m, "coreidle_mask:");
 	cpulist_scnprintf(buf, sizeof(buf), sched_coreidle_mask);
 	seq_printf(m, "%s\n", buf);
+
+	/* throttled task list */
+	for_each_online_cpu(i) {
+		struct list_head *head = &per_cpu(tq_list, i);
+		seq_printf(m, "CPU%d: ", i);
+		list_for_each_entry(p, head, se.throttle_node) {
+			seq_printf(m, "%d(%s) ", p->pid, p->comm);
+		}
+		seq_printf(m, "\n");
+	}
 	return 0;
 }
 static int sched_coreidle_open(struct inode *inode, struct file *filp)
@@ -7218,6 +7233,13 @@ void __init sched_init(void)
 	if (cpu_isolated_map == NULL)
 		zalloc_cpumask_var(&cpu_isolated_map, GFP_NOWAIT);
 #endif
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	for_each_possible_cpu(i) {
+		struct list_head *head = &per_cpu(tq_list, i);
+		INIT_LIST_HEAD(head);
+	}
+#endif
+
 	init_sched_fair_class();
 
 	scheduler_running = 1;
@@ -7857,7 +7879,6 @@ static int __cfs_schedulable(struct task_group *tg, u64 period, u64 runtime);
 #ifdef CONFIG_SCHED_EVENT_THROTTLE
 
 #include <linux/slab.h>
-static DEFINE_PER_CPU(struct list_head, tq_list);
 
 /**
  * throttle tasks on a specific cpu
@@ -7888,7 +7909,6 @@ int throttle_rq_cpu(int cpu)
                 return -1;
         }
 
-        INIT_LIST_HEAD(head);
         list_for_each_entry_safe(p, q, &rq->cfs_tasks, se.group_node) {
                 /* do not touch time sensitive kernel threads e.g., softirqd */
                 if (!p->mm) /* let's not touch kernel threads */
