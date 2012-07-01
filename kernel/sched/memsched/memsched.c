@@ -104,6 +104,9 @@ struct core_info {
 	spinlock_t lock;   /* lock to protect atomic update */
 	struct perf_event *event; /* structure */
 
+	/* local copy of global->period_cnt */
+	s64 period_cnt;
+
 	struct hrtimer reclaim_timer; /* reclaim timer */
 	ktime_t reclaim_interval;
 #if USE_TIMING
@@ -433,9 +436,16 @@ static void memsched_process_overflow(struct irq_work *entry)
 	int util_pct;
 	int i;
 	bool requested;
+	s64 period_no = atomic64_read(&global->period_cnt);
 
 	BUG_ON(in_nmi());
 
+	/* overflow after a new period */
+	if (period_no != cinfo->period_cnt) {
+		trace_printk("ERR: global->period_cnt(%lld) != cinfo->period_cnt(%lld)\n",
+			     period_no, cinfo->period_cnt);
+		return;
+	}
 	budget_used = memsched_event_used(cinfo);
 
 	/* erroneous overflow, that could have happend before period timer stop the pmu */
@@ -446,10 +456,11 @@ static void memsched_process_overflow(struct irq_work *entry)
 	}
 
 	time_remained = ktime_sub(hrtimer_get_expires(&global->timer), ktime_get());
-
-	/* overflow occured after a new period begin. */
-	if (time_remained.tv64 < 0)
+	/* overflow occured after deadline (How possible?) */
+	if (time_remained.tv64 < 0) {
+		trace_printk("ERR: overflow after deadline\n");
 		return;
+	}
 
 	/*
 	 * try to reclaim budget from the global pool
@@ -532,13 +543,14 @@ out_reclaim:
 	cinfo->throttled_time = start;
 
 	time_remained = ktime_sub(hrtimer_get_expires(&global->timer), ktime_get());
+#if 0
 	/* if there's enough time left. retry reclaim later */
 	if (time_remained.tv64 > (s64)g_reclaim_threshold_us * 1000 * 2) {
 		DEBUG_RECLAIM(trace_printk("start reclaim timer\n"));
 		hrtimer_start(&cinfo->reclaim_timer, 
 			      cinfo->reclaim_interval, HRTIMER_MODE_REL_PINNED);
 	}
-
+#endif
 out_overflow:
 	TIMING_DEBUG(cinfo->throttle_cost =
 		     ktime_add(cinfo->throttle_cost,
@@ -552,7 +564,7 @@ out_overflow:
 static void __reset_counter(void *info)
 {
 	struct core_info *cinfo = this_cpu_ptr(core_info);
-	// struct memsched_info *global = &memsched_info;
+	struct memsched_info *global = &memsched_info;
 	int count;
 
 	TIMING_DEBUG(ktime_t start;);
@@ -561,6 +573,9 @@ static void __reset_counter(void *info)
 	BUG_ON(!irqs_disabled() || !in_irq());
 
 	cinfo->event->pmu->stop(cinfo->event, PERF_EF_UPDATE);
+
+	/* update local period information */
+	cinfo->period_cnt = atomic64_read(&global->period_cnt);
 
 	/* cinfo->lock is not needed, since this is run on hardirq
 	   context and the only contender is userspace thread that re-configure
@@ -964,8 +979,8 @@ static ssize_t memsched_failcnt_write(struct file *filp,
 
 	/* reset global statistics */
 	atomic64_set(&memsched_info.period_cnt, 0);
-	smp_mb();
 
+	smp_mb();
 	for_each_online_cpu(i) {
 		struct core_info *cinfo = per_cpu_ptr(core_info, i);
 		spin_lock_irqsave(&cinfo->lock, flags);
@@ -979,6 +994,7 @@ static ssize_t memsched_failcnt_write(struct file *filp,
 		spin_unlock_irqrestore(&cinfo->lock, flags);
 
 	}
+	smp_mb();
 	return cnt;
 }
 
@@ -1091,17 +1107,15 @@ void cleanup_module( void )
 {
 	int ret, i;
 
-	/* cancel hrtimer */
+	/* stop perf_event counters */
+	disable_counters();
+
+	/* stop period timer */
 	ret = hrtimer_cancel(&memsched_info.timer);
 	if (ret)
 		trace_printk("The timer was still in use...\n");
 
-	msleep(10);
-
-	/* destroy perf_event */
-	disable_counters();
-
-	/* fixup */
+	/* destroy perf objects */
 	for_each_online_cpu(i) {
 		struct core_info *cinfo = per_cpu_ptr(core_info, i);
 
