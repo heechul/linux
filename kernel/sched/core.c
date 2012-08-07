@@ -7911,9 +7911,11 @@ int throttle_rq_cpu(int cpu)
 
         list_for_each_entry_safe(p, q, &rq->cfs_tasks, se.group_node) {
                 /* do not touch time sensitive kernel threads e.g., softirqd */
-                if (!p->mm) /* let's not touch kernel threads */
+                if (!p->mm)
                         continue;
-
+		/* do not throttle non-running tasks (e.g., waiting events) */
+		if (p->state != TASK_RUNNING)
+			continue;
                 /*
                  * dequeue the task
                  *   cfs_rq->h_nr_running-- && rq->nr_running-- is done here
