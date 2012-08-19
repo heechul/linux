@@ -38,6 +38,7 @@ struct rlimit;
 struct rlimit64;
 struct rusage;
 struct sched_param;
+struct sched_param2;
 struct sel_arg_struct;
 struct semaphore;
 struct sembuf;
@@ -328,11 +329,17 @@ asmlinkage long sys_clock_nanosleep(clockid_t which_clock, int flags,
 asmlinkage long sys_nice(int increment);
 asmlinkage long sys_sched_setscheduler(pid_t pid, int policy,
 					struct sched_param __user *param);
+asmlinkage long sys_sched_setscheduler2(pid_t pid, int policy,
+					struct sched_param2 __user *param);
 asmlinkage long sys_sched_setparam(pid_t pid,
 					struct sched_param __user *param);
+asmlinkage long sys_sched_setparam2(pid_t pid,
+					struct sched_param2 __user *param);
 asmlinkage long sys_sched_getscheduler(pid_t pid);
 asmlinkage long sys_sched_getparam(pid_t pid,
 					struct sched_param __user *param);
+asmlinkage long sys_sched_getparam2(pid_t pid,
+					struct sched_param2 __user *param);
 asmlinkage long sys_sched_setaffinity(pid_t pid, unsigned int len,
 					unsigned long __user *user_mask_ptr);
 asmlinkage long sys_sched_getaffinity(pid_t pid, unsigned int len,
@@ -858,4 +865,6 @@ asmlinkage long sys_process_vm_writev(pid_t pid,
 				      unsigned long riovcnt,
 				      unsigned long flags);
 
+asmlinkage long sys_kcmp(pid_t pid1, pid_t pid2, int type,
+			 unsigned long idx1, unsigned long idx2);
 #endif

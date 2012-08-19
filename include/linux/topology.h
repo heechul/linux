@@ -98,7 +98,6 @@ int arch_update_cpu_topology(void);
 				| 0*SD_BALANCE_WAKE			\
 				| 1*SD_WAKE_AFFINE			\
 				| 1*SD_SHARE_CPUPOWER			\
-				| 0*SD_POWERSAVINGS_BALANCE		\
 				| 1*SD_SHARE_PKG_RESOURCES		\
 				| 0*SD_SERIALIZE			\
 				| 0*SD_PREFER_SIBLING			\
@@ -134,8 +133,6 @@ int arch_update_cpu_topology(void);
 				| 0*SD_SHARE_CPUPOWER			\
 				| 1*SD_SHARE_PKG_RESOURCES		\
 				| 0*SD_SERIALIZE			\
-				| sd_balance_for_mc_power()		\
-				| sd_power_saving_flags()		\
 				,					\
 	.last_balance		= jiffies,				\
 	.balance_interval	= 1,					\
@@ -167,8 +164,6 @@ int arch_update_cpu_topology(void);
 				| 0*SD_SHARE_CPUPOWER			\
 				| 0*SD_SHARE_PKG_RESOURCES		\
 				| 0*SD_SERIALIZE			\
-				| sd_balance_for_package_power()	\
-				| sd_power_saving_flags()		\
 				,					\
 	.last_balance		= jiffies,				\
 	.balance_interval	= 1,					\
@@ -202,7 +197,7 @@ static inline int cpu_to_node(int cpu)
 #ifndef set_numa_node
 static inline void set_numa_node(int node)
 {
-	percpu_write(numa_node, node);
+	this_cpu_write(numa_node, node);
 }
 #endif
 
@@ -237,7 +232,7 @@ DECLARE_PER_CPU(int, _numa_mem_);
 #ifndef set_numa_mem
 static inline void set_numa_mem(int node)
 {
-	percpu_write(_numa_mem_, node);
+	this_cpu_write(_numa_mem_, node);
 }
 #endif
 

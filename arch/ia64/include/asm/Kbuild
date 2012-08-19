@@ -1,6 +1,7 @@
 include include/asm-generic/Kbuild.asm
 
 header-y += break.h
+header-y += cmpxchg.h
 header-y += fpu.h
 header-y += gcc_intrin.h
 header-y += ia64regs.h
@@ -12,3 +13,4 @@ header-y += ptrace_offsets.h
 header-y += rse.h
 header-y += ucontext.h
 header-y += ustack.h
+generic-y += math128.h

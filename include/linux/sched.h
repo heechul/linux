@@ -39,6 +39,7 @@
 #define SCHED_BATCH		3
 /* SCHED_ISO: reserved but not implemented yet */
 #define SCHED_IDLE		5
+#define SCHED_DEADLINE		6
 /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
 #define SCHED_RESET_ON_FORK     0x40000000
 
@@ -56,6 +57,7 @@ struct sched_param {
 #include <linux/types.h>
 #include <linux/timex.h>
 #include <linux/jiffies.h>
+#include <linux/plist.h>
 #include <linux/rbtree.h>
 #include <linux/thread_info.h>
 #include <linux/cpumask.h>
@@ -90,8 +92,61 @@ struct sched_param {
 #include <linux/latencytop.h>
 #include <linux/cred.h>
 #include <linux/llist.h>
+#include <linux/uidgid.h>
 
 #include <asm/processor.h>
+
+/*
+ * Extended scheduling parameters data structure.
+ *
+ * This is needed because the original struct sched_param can not be
+ * altered without introducing ABI issues with legacy applications
+ * (e.g., in sched_getparam()).
+ *
+ * However, the possibility of specifying more than just a priority for
+ * the tasks may be useful for a wide variety of application fields, e.g.,
+ * multimedia, streaming, automation and control, and many others.
+ *
+ * This variant (sched_param2) is meant at describing a so-called
+ * sporadic time-constrained task. In such model a task is specified by:
+ *  - the activation period or minimum instance inter-arrival time;
+ *  - the maximum (or average, depending on the actual scheduling
+ *    discipline) computation time of all instances, a.k.a. runtime;
+ *  - the deadline (relative to the actual activation time) of each
+ *    instance.
+ * Very briefly, a periodic (sporadic) task asks for the execution of
+ * some specific computation --which is typically called an instance--
+ * (at most) every period. Moreover, each instance typically lasts no more
+ * than the runtime and must be completed by time instant t equal to
+ * the instance activation time + the deadline.
+ *
+ * This is reflected by the actual fields of the sched_param2 structure:
+ *
+ *  @sched_priority     task's priority (might still be useful)
+ *  @sched_deadline     representative of the task's deadline
+ *  @sched_runtime      representative of the task's runtime
+ *  @sched_period       representative of the task's period
+ *  @sched_flags        for customizing the scheduler behaviour
+ *
+ * Given this task model, there are a multiplicity of scheduling algorithms
+ * and policies, that can be used to ensure all the tasks will make their
+ * timing constraints.
+ *
+ * @__unused		padding to allow future expansion without ABI issues
+ *
+ * As of now, the SCHED_DEADLINE policy (sched_dl scheduling class) is the
+ * only user of this new interface. More information about the algorithm
+ * available in the scheduling class file or in Documentation/.
+ */
+struct sched_param2 {
+	int sched_priority;
+	unsigned int sched_flags;
+	u64 sched_runtime;
+	u64 sched_deadline;
+	u64 sched_period;
+
+	u64 __unused[12];
+};
 
 struct exec_domain;
 struct futex_pi_state;
@@ -144,6 +199,7 @@ extern unsigned long this_cpu_load(void);
 
 
 extern void calc_global_load(unsigned long ticks);
+extern void update_cpu_load_nohz(void);
 
 extern unsigned long get_parent_ip(unsigned long addr);
 
@@ -437,6 +493,7 @@ extern int get_dumpable(struct mm_struct *mm);
 					/* leave room for more dump flags */
 #define MMF_VM_MERGEABLE	16	/* KSM may merge identical pages */
 #define MMF_VM_HUGEPAGE		17	/* set when VM_HUGEPAGE is set on vma */
+#define MMF_EXE_FILE_CHANGED	18	/* see prctl_set_mm_exe_file() */
 
 #define MMF_INIT_MASK		(MMF_DUMPABLE_MASK | MMF_DUMP_FILTER_MASK)
 
@@ -728,8 +785,7 @@ struct user_struct {
 
 	/* Hash table maintenance information */
 	struct hlist_node uidhash_node;
-	uid_t uid;
-	struct user_namespace *user_ns;
+	kuid_t uid;
 
 #ifdef CONFIG_PERF_EVENTS
 	atomic_long_t locked_vm;
@@ -738,7 +794,7 @@ struct user_struct {
 
 extern int uids_sysfs_init(void);
 
-extern struct user_struct *find_user(uid_t);
+extern struct user_struct *find_user(kuid_t);
 
 extern struct user_struct root_user;
 #define INIT_USER (&root_user)
@@ -855,60 +911,13 @@ enum cpu_idle_type {
 #define SD_WAKE_AFFINE		0x0020	/* Wake task to waking CPU */
 #define SD_PREFER_LOCAL		0x0040  /* Prefer to keep tasks local to this domain */
 #define SD_SHARE_CPUPOWER	0x0080	/* Domain members share cpu power */
-#define SD_POWERSAVINGS_BALANCE	0x0100	/* Balance for power savings */
 #define SD_SHARE_PKG_RESOURCES	0x0200	/* Domain members share cpu pkg resources */
 #define SD_SERIALIZE		0x0400	/* Only a single load balancing instance */
 #define SD_ASYM_PACKING		0x0800  /* Place busy groups earlier in the domain */
 #define SD_PREFER_SIBLING	0x1000	/* Prefer to place tasks in a sibling domain */
 #define SD_OVERLAP		0x2000	/* sched_domains of this level overlap */
 
-enum powersavings_balance_level {
-	POWERSAVINGS_BALANCE_NONE = 0,  /* No power saving load balance */
-	POWERSAVINGS_BALANCE_BASIC,	/* Fill one thread/core/package
-					 * first for long running threads
-					 */
-	POWERSAVINGS_BALANCE_WAKEUP,	/* Also bias task wakeups to semi-idle
-					 * cpu package for power savings
-					 */
-	MAX_POWERSAVINGS_BALANCE_LEVELS
-};
-
-extern int sched_mc_power_savings, sched_smt_power_savings;
-
-static inline int sd_balance_for_mc_power(void)
-{
-	if (sched_smt_power_savings)
-		return SD_POWERSAVINGS_BALANCE;
-
-	if (!sched_mc_power_savings)
-		return SD_PREFER_SIBLING;
-
-	return 0;
-}
-
-static inline int sd_balance_for_package_power(void)
-{
-	if (sched_mc_power_savings | sched_smt_power_savings)
-		return SD_POWERSAVINGS_BALANCE;
-
-	return SD_PREFER_SIBLING;
-}
-
 extern int __weak arch_sd_sibiling_asym_packing(void);
-
-/*
- * Optimise SD flags for power savings:
- * SD_BALANCE_NEWIDLE helps aggressive task consolidation and power savings.
- * Keep default SD flags if sched_{smt,mc}_power_saving=0
- */
-
-static inline int sd_power_saving_flags(void)
-{
-	if (sched_mc_power_savings | sched_smt_power_savings)
-		return SD_BALANCE_NEWIDLE;
-
-	return 0;
-}
 
 struct sched_group_power {
 	atomic_t ref;
@@ -922,6 +931,8 @@ struct sched_group_power {
 	 * Number of busy cpus in this group.
 	 */
 	atomic_t nr_busy_cpus;
+
+	unsigned long cpumask[0]; /* iteration mask */
 };
 
 struct sched_group {
@@ -944,6 +955,15 @@ struct sched_group {
 static inline struct cpumask *sched_group_cpus(struct sched_group *sg)
 {
 	return to_cpumask(sg->cpumask);
+}
+
+/*
+ * cpumask masking which cpus in the group are allowed to iterate up the domain
+ * tree.
+ */
+static inline struct cpumask *sched_group_mask(struct sched_group *sg)
+{
+	return to_cpumask(sg->sgp->cpumask);
 }
 
 /**
@@ -1116,6 +1136,7 @@ struct sched_domain;
 #else
 #define ENQUEUE_WAKING		0
 #endif
+#define ENQUEUE_REPLENISH	8
 
 #define DEQUEUE_SLEEP		1
 
@@ -1150,6 +1171,7 @@ struct sched_class {
 	void (*set_curr_task) (struct rq *rq);
 	void (*task_tick) (struct rq *rq, struct task_struct *p, int queued);
 	void (*task_fork) (struct task_struct *p);
+	void (*task_dead) (struct task_struct *p);
 
 	void (*switched_from) (struct rq *this_rq, struct task_struct *task);
 	void (*switched_to) (struct rq *this_rq, struct task_struct *task);
@@ -1237,7 +1259,6 @@ struct sched_rt_entity {
 	struct list_head run_list;
 	unsigned long timeout;
 	unsigned int time_slice;
-	int nr_cpus_allowed;
 
 	struct sched_rt_entity *back;
 #ifdef CONFIG_RT_GROUP_SCHED
@@ -1246,6 +1267,66 @@ struct sched_rt_entity {
 	struct rt_rq		*rt_rq;
 	/* rq "owned" by this entity/group: */
 	struct rt_rq		*my_q;
+#endif
+};
+
+#ifdef CONFIG_SCHEDSTATS
+struct sched_stats_dl {
+	u64			last_dmiss;
+	u64			last_rorun;
+	u64			dmiss_max;
+	u64			rorun_max;
+};
+#endif
+
+struct sched_dl_entity {
+	struct rb_node	rb_node;
+	int nr_cpus_allowed;
+
+	/*
+	 * Original scheduling parameters. Copied here from sched_param2
+	 * during sched_setscheduler2(), they will remain the same until
+	 * the next sched_setscheduler2().
+	 */
+	u64 dl_runtime;		/* maximum runtime for each instance	*/
+	u64 dl_deadline;	/* relative deadline of each instance	*/
+	u64 dl_period;		/* separation of two instances (period) */
+	u64 dl_bw;		/* dl_runtime / dl_deadline		*/
+
+	/*
+	 * Actual scheduling parameters. Initialized with the values above,
+	 * they are continously updated during task execution. Note that
+	 * the remaining runtime could be < 0 in case we are in overrun.
+	 */
+	s64 runtime;		/* remaining runtime for this instance	*/
+	u64 deadline;		/* absolute deadline for this instance	*/
+	unsigned int flags;	/* specifying the scheduler behaviour	*/
+
+	/*
+	 * Some bool flags:
+	 *
+	 * @dl_throttled tells if we exhausted the runtime. If so, the
+	 * task has to wait for a replenishment to be performed at the
+	 * next firing of dl_timer.
+	 *
+	 * @dl_new tells if a new instance arrived. If so we must
+	 * start executing it with full runtime and reset its absolute
+	 * deadline;
+	 *
+	 * @dl_boosted tells if we are boosted due to DI. If so we are
+	 * outside bandwidth enforcement mechanism (but only until we
+	 * exit the critical section).
+	 */
+	int dl_throttled, dl_new, dl_boosted;
+
+	/*
+	 * Bandwidth enforcement timer. Each -deadline task has its
+	 * own bandwidth to be enforced, thus we need one timer per task.
+	 */
+	struct hrtimer dl_timer;
+
+#ifdef CONFIG_SCHEDSTATS
+	struct sched_stats_dl stats;
 #endif
 };
 
@@ -1282,6 +1363,7 @@ struct task_struct {
 	const struct sched_class *sched_class;
 	struct sched_entity se;
 	struct sched_rt_entity rt;
+	struct sched_dl_entity dl;
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	/* list of struct preempt_notifier: */
@@ -1302,6 +1384,7 @@ struct task_struct {
 #endif
 
 	unsigned int policy;
+	int nr_cpus_allowed;
 	cpumask_t cpus_allowed;
 
 #ifdef CONFIG_PREEMPT_RCU
@@ -1323,6 +1406,7 @@ struct task_struct {
 	struct list_head tasks;
 #ifdef CONFIG_SMP
 	struct plist_node pushable_tasks;
+	struct rb_node pushable_dl_tasks;
 #endif
 
 	struct mm_struct *mm, *active_mm;
@@ -1344,15 +1428,12 @@ struct task_struct {
 				 * execve */
 	unsigned in_iowait:1;
 
+	/* task may not gain privileges */
+	unsigned no_new_privs:1;
 
 	/* Revert to default priority/policy when forking */
 	unsigned sched_reset_on_fork:1;
 	unsigned sched_contributes_to_load:1;
-
-#ifdef CONFIG_GENERIC_HARDIRQS
-	/* IRQ handler threads */
-	unsigned irq_thread:1;
-#endif
 
 	pid_t pid;
 	pid_t tgid;
@@ -1361,10 +1442,9 @@ struct task_struct {
 	/* Canary value for the -fstack-protector gcc feature */
 	unsigned long stack_canary;
 #endif
-
-	/* 
+	/*
 	 * pointers to (original) parent process, youngest child, younger sibling,
-	 * older sibling, respectively.  (p->father can be replaced with 
+	 * older sibling, respectively.  (p->father can be replaced with
 	 * p->real_parent->pid)
 	 */
 	struct task_struct __rcu *real_parent; /* real parent process */
@@ -1411,8 +1491,6 @@ struct task_struct {
 					 * credentials (COW) */
 	const struct cred __rcu *cred;	/* effective (overridable) subjective task
 					 * credentials (COW) */
-	struct cred *replacement_session_keyring; /* for KEYCTL_SESSION_TO_PARENT */
-
 	char comm[TASK_COMM_LEN]; /* executable name excluding path
 				     - access with [gs]et_task_comm (which lock
 				       it with task_lock())
@@ -1448,12 +1526,14 @@ struct task_struct {
 	int (*notifier)(void *priv);
 	void *notifier_data;
 	sigset_t *notifier_mask;
+	struct hlist_head task_works;
+
 	struct audit_context *audit_context;
 #ifdef CONFIG_AUDITSYSCALL
 	uid_t loginuid;
 	unsigned int sessionid;
 #endif
-	seccomp_t seccomp;
+	struct seccomp seccomp;
 
 /* Thread group tracking */
    	u32 parent_exec_id;
@@ -1467,9 +1547,12 @@ struct task_struct {
 
 #ifdef CONFIG_RT_MUTEXES
 	/* PI waiters blocked on a rt_mutex held by this task */
-	struct plist_head pi_waiters;
+	struct rb_root pi_waiters;
+	struct rb_node *pi_waiters_leftmost;
 	/* Deadlock detection and priority inheritance handling */
 	struct rt_mutex_waiter *pi_blocked_on;
+	/* Top pi_waiters task */
+	struct task_struct *pi_top_task;
 #endif
 
 #ifdef CONFIG_DEBUG_MUTEXES
@@ -1620,6 +1703,10 @@ struct task_struct {
 #ifdef CONFIG_HAVE_HW_BREAKPOINT
 	atomic_t ptrace_bp_refcnt;
 #endif
+#ifdef CONFIG_UPROBES
+	struct uprobe_task *utask;
+	int uprobe_srcu_id;
+#endif
 };
 
 /* Future-safe accessor for struct task_struct's cpus_allowed. */
@@ -1636,6 +1723,10 @@ struct task_struct {
  * user-space.  This allows kernel threads to set their
  * priority to a value higher than any user task. Note:
  * MAX_RT_PRIO must not be smaller than MAX_USER_RT_PRIO.
+ *
+ * SCHED_DEADLINE tasks has negative priorities, reflecting
+ * the fact that any of them has higher prio than RT and
+ * NORMAL/BATCH tasks.
  */
 
 #define MAX_USER_RT_PRIO	100
@@ -1644,9 +1735,23 @@ struct task_struct {
 #define MAX_PRIO		(MAX_RT_PRIO + 40)
 #define DEFAULT_PRIO		(MAX_RT_PRIO + 20)
 
+#define MAX_DL_PRIO		0
+
+static inline int dl_prio(int prio)
+{
+	if (unlikely(prio < MAX_DL_PRIO))
+		return 1;
+	return 0;
+}
+
+static inline int dl_task(struct task_struct *p)
+{
+	return dl_prio(p->prio);
+}
+
 static inline int rt_prio(int prio)
 {
-	if (unlikely(prio < MAX_RT_PRIO))
+	if ((unsigned)prio < MAX_RT_PRIO)
 		return 1;
 	return 0;
 }
@@ -1908,9 +2013,19 @@ static inline void rcu_copy_process(struct task_struct *p)
 	INIT_LIST_HEAD(&p->rcu_node_entry);
 }
 
+static inline void rcu_switch_from(struct task_struct *prev)
+{
+	if (prev->rcu_read_lock_nesting != 0)
+		rcu_preempt_note_context_switch();
+}
+
 #else
 
 static inline void rcu_copy_process(struct task_struct *p)
+{
+}
+
+static inline void rcu_switch_from(struct task_struct *prev)
 {
 }
 
@@ -2068,6 +2183,13 @@ int sched_rt_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp,
 		loff_t *ppos);
 
+extern unsigned int sysctl_sched_dl_period;
+extern int sysctl_sched_dl_runtime;
+
+int sched_dl_handler(struct ctl_table *table, int write,
+		void __user *buffer, size_t *lenp,
+		loff_t *ppos);
+
 #ifdef CONFIG_SCHED_AUTOGROUP
 extern unsigned int sysctl_sched_autogroup_enabled;
 
@@ -2093,6 +2215,7 @@ extern unsigned int sysctl_sched_cfs_bandwidth_slice;
 #ifdef CONFIG_RT_MUTEXES
 extern int rt_mutex_getprio(struct task_struct *p);
 extern void rt_mutex_setprio(struct task_struct *p, int prio);
+extern struct task_struct *rt_mutex_get_top_task(struct task_struct *task);
 extern void rt_mutex_adjust_pi(struct task_struct *p);
 static inline bool tsk_is_pi_blocked(struct task_struct *tsk)
 {
@@ -2121,6 +2244,8 @@ extern int sched_setscheduler(struct task_struct *, int,
 			      const struct sched_param *);
 extern int sched_setscheduler_nocheck(struct task_struct *, int,
 				      const struct sched_param *);
+extern int sched_setscheduler2(struct task_struct *, int,
+				 const struct sched_param2 *);
 extern struct task_struct *idle_task(int cpu);
 /**
  * is_idle_task - is the specified task an idle task?
@@ -2180,14 +2305,13 @@ extern struct task_struct *find_task_by_pid_ns(pid_t nr,
 extern void __set_special_pids(struct pid *pid);
 
 /* per-UID process charging. */
-extern struct user_struct * alloc_uid(struct user_namespace *, uid_t);
+extern struct user_struct * alloc_uid(kuid_t);
 static inline struct user_struct *get_uid(struct user_struct *u)
 {
 	atomic_inc(&u->__count);
 	return u;
 }
 extern void free_uid(struct user_struct *);
-extern void release_uids(struct user_namespace *ns);
 
 #include <asm/current.h>
 
@@ -2201,7 +2325,7 @@ extern void wake_up_new_task(struct task_struct *tsk);
 #else
  static inline void kick_process(struct task_struct *tsk) { }
 #endif
-extern void sched_fork(struct task_struct *p);
+extern int sched_fork(struct task_struct *p);
 extern void sched_dead(struct task_struct *p);
 
 extern void proc_caches_init(void);
@@ -2247,6 +2371,20 @@ extern void sigqueue_free(struct sigqueue *);
 extern int send_sigqueue(struct sigqueue *,  struct task_struct *, int group);
 extern int do_sigaction(int, struct k_sigaction *, struct k_sigaction *);
 extern int do_sigaltstack(const stack_t __user *, stack_t __user *, unsigned long);
+
+static inline void restore_saved_sigmask(void)
+{
+	if (test_and_clear_restore_sigmask())
+		__set_current_blocked(&current->saved_sigmask);
+}
+
+static inline sigset_t *sigmask_to_save(void)
+{
+	sigset_t *res = &current->blocked;
+	if (unlikely(test_restore_sigmask()))
+		res = &current->saved_sigmask;
+	return res;
+}
 
 static inline int kill_cad_pid(int sig, int priv)
 {
