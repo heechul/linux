@@ -8582,13 +8582,22 @@ int throttle_rq_cpu(int cpu)
                         deactivate_task(rq, p, DEQUEUE_SLEEP);
                         p->on_rq = 0;
                         trace_printk(" p%d(%s,%d)\n", throttle_cnt, p->comm, p->pid);
+#ifdef CONFIG_CFS_BANDWIDTH
+			rq->cfs.throttle_count++;
+#endif
                 } else {
                         trace_printk(" p%d(%s,%d) is not in rq. why???\n",
                                      throttle_cnt, p->comm, p->pid);
                 }
         }
 
-        resched_task(cpu_curr(cpu));
+        if (throttle_cnt > 0) {
+#ifdef CONFIG_CFS_BANDWIDTH
+		rq->cfs.throttled = 1;
+#endif
+		resched_task(cpu_curr(cpu));
+	}
+
         /* TODO: handle realtime class */
         raw_spin_unlock_irqrestore(&rq->lock, flags);
         return throttle_cnt;
@@ -8613,6 +8622,9 @@ int unthrottle_rq_cpu(int cpu)
 
         list_for_each_entry_safe(p, q, head, se.throttle_node) {
                 BUG_ON(p == NULL);
+#ifdef CONFIG_CFS_BANDWIDTH
+		rq->cfs.throttle_count--;
+#endif
                 if (!p->on_rq) {
                         activate_task(rq, p, ENQUEUE_WAKEUP);
                         p->on_rq = 1;
@@ -8625,7 +8637,13 @@ int unthrottle_rq_cpu(int cpu)
                 trace_printk(" p%d(%s,%d)\n", unthrottle_cnt, p->comm, p->pid);
         }
 
-        resched_task(cpu_curr(cpu));
+        if (unthrottle_cnt > 0) {
+#ifdef CONFIG_CFS_BANDWIDTH
+		rq->cfs.throttled = 0;
+#endif
+		resched_task(cpu_curr(cpu));
+	}
+
         raw_spin_unlock_irqrestore(&rq->lock, flags);
         return unthrottle_cnt;
 }
