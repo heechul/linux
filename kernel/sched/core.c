@@ -353,6 +353,12 @@ unsigned int sysctl_sched_dl_period = 1000000;
 int sysctl_sched_dl_runtime = 50000;
 
 
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+/*
+ * throttle period callback function pointer
+ */
+static void (*tq_period_callback)(void *info) = NULL;
+#endif
 
 /*
  * __task_rq_lock - lock the rq @p resides on.
@@ -3273,6 +3279,11 @@ void scheduler_tick(void)
 #ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
 	trigger_load_balance(rq, cpu);
+#endif
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	if (tq_period_callback)
+		tq_period_callback(NULL);
+	trace_printk("jiffies = %ld\n", jiffies);
 #endif
 }
 
@@ -8648,8 +8659,15 @@ int unthrottle_rq_cpu(int cpu)
         return unthrottle_cnt;
 }
 
+void register_throttle_period_callback(void *func)
+{
+	trace_printk("Register throttle period callback = 0x%lx\n",(long)func);
+	tq_period_callback = func;
+}
+
 EXPORT_SYMBOL(throttle_rq_cpu);
 EXPORT_SYMBOL(unthrottle_rq_cpu);
+EXPORT_SYMBOL(register_throttle_period_callback);
 
 #endif /* CONFIG_SCHED_EVENT_THROTTLE */
 
