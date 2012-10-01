@@ -456,7 +456,7 @@ struct root_domain {
 };
 
 extern struct root_domain def_root_domain;
-
+extern cpumask_var_t sched_coreidle_mask;
 #endif /* CONFIG_SMP */
 
 /*

@@ -1235,6 +1235,9 @@ struct sched_entity {
 	struct load_weight	load;		/* for load-balancing */
 	struct rb_node		run_node;
 	struct list_head	group_node;
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	struct list_head        throttle_node;
+#endif
 	unsigned int		on_rq;
 
 	u64			exec_start;

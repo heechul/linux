@@ -88,6 +88,8 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 
+static DEFINE_PER_CPU(struct list_head, tq_list);
+
 void start_bandwidth_timer(struct hrtimer *period_timer, ktime_t period)
 {
 	unsigned long delta;
@@ -249,11 +251,65 @@ static const struct file_operations sched_feat_fops = {
 	.release	= single_release,
 };
 
+static ssize_t sched_coreidle_write(struct file *filp, const char __user *ubuf,
+				    size_t cnt, loff_t *ppos)
+{
+	char buf[64];
+
+	if (cnt > 63) cnt = 63;
+	if (copy_from_user(&buf, ubuf, cnt))
+		return -EFAULT;
+
+	cpumask_clear(sched_coreidle_mask);
+	cpulist_parse(buf, sched_coreidle_mask);
+	cpulist_scnprintf(buf, 64, sched_coreidle_mask);
+	printk(KERN_DEBUG "sched_userspace: %s\n", buf);
+
+	*ppos += cnt;
+	return cnt;
+}
+
+static int sched_coreidle_show(struct seq_file *m, void *v)
+{
+	char buf[512];
+	int i;
+	struct task_struct *p;
+
+	seq_printf(m, "coreidle_mask:");
+	cpulist_scnprintf(buf, sizeof(buf), sched_coreidle_mask);
+	seq_printf(m, "%s\n", buf);
+
+	/* throttled task list */
+	for_each_online_cpu(i) {
+		struct list_head *head = &per_cpu(tq_list, i);
+		seq_printf(m, "CPU%d: ", i);
+		list_for_each_entry(p, head, se.throttle_node) {
+			seq_printf(m, "%d(%s) ", p->pid, p->comm);
+		}
+		seq_printf(m, "\n");
+	}
+	return 0;
+}
+static int sched_coreidle_open(struct inode *inode, struct file *filp)
+{
+	return single_open(filp, sched_coreidle_show, NULL);
+}
+
+static const struct file_operations sched_coreidle_fops = {
+	.open		= sched_coreidle_open,
+	.write          = sched_coreidle_write,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 static __init int sched_init_debug(void)
 {
 	debugfs_create_file("sched_features", 0644, NULL, NULL,
 			&sched_feat_fops);
 
+	debugfs_create_file("coreidle", 0644, NULL, NULL,
+			    &sched_coreidle_fops);
 	return 0;
 }
 late_initcall(sched_init_debug);
@@ -297,6 +353,13 @@ unsigned int sysctl_sched_dl_period = 1000000;
 int sysctl_sched_dl_runtime = 50000;
 
 
+
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+/*
+ * throttle period callback function pointer
+ */
+static void (*tq_period_callback)(void *info) = NULL;
+#endif
 
 /*
  * __task_rq_lock - lock the rq @p resides on.
@@ -1284,6 +1347,8 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 			continue;
 		if (!cpu_active(dest_cpu))
 			continue;
+		if (cpumask_test_cpu(dest_cpu, sched_coreidle_mask))
+			continue;
 		if (cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p)))
 			return dest_cpu;
 	}
@@ -1723,7 +1788,9 @@ static void __sched_fork(struct task_struct *p)
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
 	INIT_LIST_HEAD(&p->se.group_node);
-
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	INIT_LIST_HEAD(&p->se.throttle_node);
+#endif
 #ifdef CONFIG_SCHEDSTATS
 	memset(&p->se.statistics, 0, sizeof(p->se.statistics));
 #endif
@@ -3349,6 +3416,11 @@ void scheduler_tick(void)
 #ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
 	trigger_load_balance(rq, cpu);
+#endif
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	if (tq_period_callback)
+		tq_period_callback(NULL);
+	trace_printk("jiffies = %ld\n", jiffies);
 #endif
 }
 
@@ -6500,6 +6572,8 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 /* cpus with isolated domains */
 static cpumask_var_t cpu_isolated_map;
 
+cpumask_var_t sched_coreidle_mask;
+
 /* Setup the mask of cpus configured for isolated domains */
 static int __init isolated_cpu_setup(char *str)
 {
@@ -7797,11 +7871,20 @@ void __init sched_init(void)
 
 #ifdef CONFIG_SMP
 	zalloc_cpumask_var(&sched_domains_tmpmask, GFP_NOWAIT);
+	zalloc_cpumask_var(&sched_coreidle_mask, GFP_NOWAIT);
+
 	/* May be allocated at isolcpus cmdline parse time */
 	if (cpu_isolated_map == NULL)
 		zalloc_cpumask_var(&cpu_isolated_map, GFP_NOWAIT);
 	idle_thread_set_boot_cpu();
 #endif
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+	for_each_possible_cpu(i) {
+		struct list_head *head = &per_cpu(tq_list, i);
+		INIT_LIST_HEAD(head);
+	}
+#endif
+
 	init_sched_fair_class();
 
 	scheduler_running = 1;
@@ -8618,6 +8701,136 @@ const u64 max_cfs_quota_period = 1 * NSEC_PER_SEC; /* 1s */
 const u64 min_cfs_quota_period = 1 * NSEC_PER_MSEC; /* 1ms */
 
 static int __cfs_schedulable(struct task_group *tg, u64 period, u64 runtime);
+
+#ifdef CONFIG_SCHED_EVENT_THROTTLE
+
+#include <linux/slab.h>
+
+/**
+ * throttle tasks on a specific cpu
+ *
+ * @cpu target cpu
+ * @return the number of throttled tasks.
+ *
+ * [contract]
+ * - must be reenterrant. can be called in the interrupt context
+ */
+int throttle_rq_cpu(int cpu)
+{
+        struct rq *rq ;
+        struct cfs_rq *cfs_rq;
+        unsigned long flags;
+        struct task_struct *q, *p;
+        struct list_head *head = &per_cpu(tq_list, cpu);
+        int throttle_cnt = 0;
+
+        rq = cpu_rq(cpu);
+        cfs_rq = &rq->cfs; /* no cgroup support */
+
+	/* to prevent migration to this throttled core */
+	cpumask_set_cpu(cpu, sched_coreidle_mask); 
+
+        if (!raw_spin_trylock_irqsave(&rq->lock, flags)) {
+                trace_printk("failed to get rq->lock\n");
+                return -1;
+        }
+
+        list_for_each_entry_safe(p, q, &rq->cfs_tasks, se.group_node) {
+                /* do not touch time sensitive kernel threads e.g., softirqd */
+                if (!p->mm)
+                        continue;
+		/* do not throttle non-running tasks (e.g., waiting events) */
+		if (p->state != TASK_RUNNING)
+			continue;
+                /*
+                 * dequeue the task
+                 *   cfs_rq->h_nr_running-- && rq->nr_running-- is done here
+                 *   ->dequeue_task_fair()
+                 */
+                if (p->on_rq) {
+			/* add to throttled list */
+                        list_add(&p->se.throttle_node, head);
+                        throttle_cnt++;
+                        deactivate_task(rq, p, DEQUEUE_SLEEP);
+                        p->on_rq = 0;
+                        trace_printk(" p%d(%s,%d)\n", throttle_cnt, p->comm, p->pid);
+#ifdef CONFIG_CFS_BANDWIDTH
+			rq->cfs.throttle_count++;
+#endif
+                } else {
+                        trace_printk(" p%d(%s,%d) is not in rq. why???\n",
+                                     throttle_cnt, p->comm, p->pid);
+                }
+        }
+
+        if (throttle_cnt > 0) {
+#ifdef CONFIG_CFS_BANDWIDTH
+		rq->cfs.throttled = 1;
+#endif
+		resched_task(cpu_curr(cpu));
+	}
+
+        /* TODO: handle realtime class */
+        raw_spin_unlock_irqrestore(&rq->lock, flags);
+        return throttle_cnt;
+}
+
+int unthrottle_rq_cpu(int cpu)
+{
+        struct rq *rq ;
+        unsigned long flags;
+        struct task_struct *q, *p;
+        struct list_head *head = &per_cpu(tq_list, cpu);
+        int unthrottle_cnt = 0;
+
+        rq = cpu_rq(cpu);
+        if (!raw_spin_trylock_irqsave(&rq->lock, flags)) {
+                trace_printk("failed to get rq->lock\n");
+                return -1;
+        }
+
+	/* to re-enable migration to this core */
+	cpumask_clear_cpu(cpu, sched_coreidle_mask); 
+
+        list_for_each_entry_safe(p, q, head, se.throttle_node) {
+                BUG_ON(p == NULL);
+#ifdef CONFIG_CFS_BANDWIDTH
+		rq->cfs.throttle_count--;
+#endif
+                if (!p->on_rq) {
+                        activate_task(rq, p, ENQUEUE_WAKEUP);
+                        p->on_rq = 1;
+                } else {
+                        trace_printk("ERR: (%s,%d) is on %d\n",
+				     p->comm, p->pid, task_cpu(p));
+                }
+                list_del_init(&p->se.throttle_node);
+                unthrottle_cnt++;
+                trace_printk(" p%d(%s,%d)\n", unthrottle_cnt, p->comm, p->pid);
+        }
+
+        if (unthrottle_cnt > 0) {
+#ifdef CONFIG_CFS_BANDWIDTH
+		rq->cfs.throttled = 0;
+#endif
+		resched_task(cpu_curr(cpu));
+	}
+
+        raw_spin_unlock_irqrestore(&rq->lock, flags);
+        return unthrottle_cnt;
+}
+
+void register_throttle_period_callback(void *func)
+{
+	trace_printk("Register throttle period callback = 0x%lx\n",(long)func);
+	tq_period_callback = func;
+}
+
+EXPORT_SYMBOL(throttle_rq_cpu);
+EXPORT_SYMBOL(unthrottle_rq_cpu);
+EXPORT_SYMBOL(register_throttle_period_callback);
+
+#endif /* CONFIG_SCHED_EVENT_THROTTLE */
 
 static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 {
