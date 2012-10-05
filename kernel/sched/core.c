@@ -3282,8 +3282,7 @@ void scheduler_tick(void)
 #endif
 #ifdef CONFIG_SCHED_EVENT_THROTTLE
 	if (tq_period_callback)
-		tq_period_callback(NULL);
-	trace_printk("jiffies = %ld\n", jiffies);
+		tq_period_callback(rq->nr_running);
 #endif
 }
 
