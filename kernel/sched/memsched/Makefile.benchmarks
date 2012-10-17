@@ -1,0 +1,17 @@
+#CC=$(HOME)/QorIQ-DPAA-SDK-20110609-systembuilder/freescale-2010.09/bin/powerpc-linux-gnu-gcc
+
+all: latency bandwidth fps
+
+latency: latency.c
+	$(CC) latency.c -O2 -o latency -lrt
+
+bandwidth: bandwidth.c
+	$(CC) bandwidth.c -O2 -o bandwidth -lrt
+
+fps: fps.c
+	$(CC) fps.c -O2 -o fps -lrt
+
+deadline: deadline.c dl_syscalls.c
+	$(CC) deadline.c dl_syscalls.c -O2 -o $@ -lrt
+clean:
+	rm *.o *~ latency bandwidth fps
