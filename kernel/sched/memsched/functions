@@ -1,0 +1,417 @@
+#!/bin/bash
+
+[ -z "$outputfile" ] && outputfile=2corerun.txt
+
+allspec2006sorted="470.lbm
+437.leslie3d
+462.libquantum
+410.bwaves
+471.omnetpp
+459.GemsFDTD
+482.sphinx3
+429.mcf
+450.soplex
+433.milc
+434.zeusmp
+483.xalancbmk
+436.cactusADM
+403.gcc
+456.hmmer
+473.astar
+401.bzip2
+400.perlbench
+447.dealII
+454.calculix
+464.h264ref
+445.gobmk
+458.sjeng
+435.gromacs
+481.wrf
+444.namd
+465.tonto
+416.gamess
+453.povray"
+
+# 81 - 53 + 1 = 29
+allspec2006="400.perlbench 
+401.bzip2 
+403.gcc 
+429.mcf 
+445.gobmk 
+456.hmmer 
+458.sjeng 
+462.libquantum 
+464.h264ref 
+471.omnetpp 
+473.astar 
+483.xalancbmk 
+410.bwaves 
+416.gamess 
+433.milc 
+434.zeusmp 
+435.gromacs 
+436.cactusADM 
+437.leslie3d 
+444.namd 
+447.dealII 
+450.soplex 
+453.povray 
+454.calculix 
+459.GemsFDTD 
+465.tonto 
+470.lbm 
+481.wrf 
+482.sphinx3"
+
+error()
+{
+    echo "ERR: $*"
+    exit
+}
+
+check_root()
+{
+    if [ `whoami` != "root" ]; then
+	error "root perm. is needed"
+    fi
+}
+
+
+disable_prefetcher()
+{
+    check_root
+    modprobe msr
+    ./disable_core2_prefetch
+    echo "disable hardware prefetcher"
+}
+
+set_cpus()
+{
+    cpus=$1
+    idx=0
+    check_root
+
+    for v in $cpus; do
+	echo "Set CPU${idx} $v"
+	echo $v > /sys/devices/system/cpu/cpu${idx}/online
+	echo "performance" > /sys/devices/system/cpu/cpu${idx}/cpufreq/scaling_governor
+	idx=`expr $idx + 1`
+    done
+}
+
+parse_log()
+{
+    f=$1
+    if [ -f "$f" ]; then
+	cache=`grep cache-misses $f | awk '{ print $1 }'`
+	instr=`grep instructions $f | awk '{ print $1 }'`
+	elaps=`grep elapsed $f | awk '{ print $1 }'`
+	echo ${f%.*.*.perf} $instr $cache
+    fi
+}
+
+
+init_cgroup()
+{
+    mount | grep cgroup || mount -t cgroup xxx /sys/fs/cgroup
+    mkdir /sys/fs/cgroup/system
+    pushd /sys/fs/cgroup/system
+    cat /sys/devices/system/cpu/online > cpuset.cpus || error "fail"
+    echo 0 > cpuset.mems
+    for t in `cat /sys/fs/cgroup/tasks`; do
+	echo $t > tasks || echo "PID $t failed"
+    done
+    cat tasks
+    echo 1024 > cpu.shares
+    popd
+
+    mkdir /sys/fs/cgroup/experiment
+    pushd /sys/fs/cgroup/experiment
+    cat /sys/devices/system/cpu/online > cpuset.cpus
+    echo 0 > cpuset.mems
+    echo $$ > tasks
+    echo 32768 > cpu.shares
+
+    tasks=`cat tasks`
+    echo "pid of exp. bash: $tasks"
+
+    popd
+} > /dev/null
+
+print_settings()
+{
+    cat /sys/kernel/debug/memsched/control
+    cat /sys/kernel/debug/memsched/limit
+}
+
+print_stats()
+{
+    cat /sys/kernel/debug/memsched/failcnt
+    cat /sys/kernel/debug/memsched/usage
+}
+
+do_init()
+{ # load module
+    check_root
+    budgets=$1
+    reclaim=$2
+    codebase=`(cd ~/Projects/kernelapi; git log | head -n 1)`
+    option="g_period_us=1000 g_budget_max_bw=6000 g_budget_pct=$budgets"
+
+    [ ! -z "$reclaim" -a "$reclaim" = "1" ] && option="$option g_use_reclaim=1"
+
+    echo "loading module budget=$budgets"
+    lsmod | grep memsched && rmmod memsched
+
+    insmod ./memsched.ko $option
+    echo "option: $option"
+    echo "$budgets|reclaim=$reclaim|$codebase" >> $outputfile
+
+    print_settings
+}
+
+do_init_new()
+{ # load module
+    check_root
+    budgets=$1
+    reclaim=$2
+    maxbw=$3
+    codebase=`(cd ~/Projects/kernelapi; git log | head -n 1)`
+    option=""
+
+    [ "$reclaim" = "1" ] && option="$option g_use_reclaim=1"
+    [ ! -z "$maxbw" ] && option="$option g_budget_max_bw=$maxbw"
+    echo "loading module budget=$budgets"
+    lsmod | grep memsched && rmmod memsched
+
+    insmod ./memsched.ko $option
+
+    set_max_bw $maxbw
+    set_limit "$budgets"
+
+    echo "option: $option"
+    echo "$budgets|reclaim=$reclaim|$codebase" | sed 's/ /_/g' >> $outputfile
+
+    print_settings
+}
+
+do_init_common()
+{
+    check_root
+    budgets=$1
+    shares=$2
+    reclaim=$3
+    maxbw=$4
+    exclusive=$5
+    mbs=$6
+    codebase=`(cd ~/Projects/kernelapi; git log | head -n 1)`
+    option=""
+    [ "$reclaim" = "1" ] && option="$option g_use_reclaim=1"
+    echo "loading module b$budgets s$shares m$mbs r$reclaim m$maxbw c$codebase"
+
+    lsmod | grep memsched && rmmod memsched
+    insmod ./memsched.ko $option
+    [ ! -z "$maxbw" ] && set_max_bw $maxbw
+    [ ! -z "$budgets" ] && set_limit "$budgets"
+    [ ! -z "$shares" ] && set_share "$shares"
+    [ ! -z "$exclusive" ] && set_exclusive_mode $exclusive
+    [ ! -z "$mbs" ] && set_limit_mb "$mbs"
+
+    echo "m$maxbw|b$budgets|s$shares|m$mbs|r$reclaim|e$exclusive|c$codebase" | sed 's/ /_/g' >> $outputfile
+    # print_settings
+}
+
+do_init_budget()
+{
+    do_init_common "$1" "" "$2" "$3" "$4"
+}
+
+do_init_share()
+{
+    do_init_common "" "$1" "$2" "$3" "$4"
+}
+
+do_init_mb()
+{
+    mbs="$1"
+    reclaim=$2
+    exclusive=$3
+    do_init_common "" "" "$reclaim" "" "$exclusive" "$mbs"
+}
+
+set_exclusive_mode()
+{
+    check_root
+    mode=$1
+    echo exclusive $mode > /sys/kernel/debug/memsched/control
+    print_settings
+}
+
+set_reclaim()
+{
+    check_root
+    echo reclaim $1 > /sys/kernel/debug/memsched/control
+    print_settings
+}
+
+set_max_bw()
+{
+    check_root
+    maxbw=$1
+    echo maxbw $maxbw > /sys/kernel/debug/memsched/control
+    print_settings
+}
+
+set_share()
+{ # load module
+    check_root
+    shares=$1
+    echo "reset" > /sys/kernel/debug/memsched/failcnt
+    echo $shares > /sys/kernel/debug/memsched/share
+
+    print_settings
+}
+
+set_limit()
+{
+    check_root
+    budgets=$1  #in pct
+    echo "reset" > /sys/kernel/debug/memsched/failcnt
+    echo $budgets > /sys/kernel/debug/memsched/limit
+    print_settings
+}
+
+set_limit_mb()
+{
+    check_root
+    budgets=$1  #in pct
+    echo "reset" > /sys/kernel/debug/memsched/failcnt
+    echo mb $budgets > /sys/kernel/debug/memsched/limit
+    print_settings
+}
+
+run_bench()
+{
+    name=$1
+    core=$2
+
+    if [ "$name" = "000.bandwidth" ]; then
+	perf stat -e instructions:u -o C$core.$name.perf ./bandwidth -a read -c $core -t 10 &
+    elif [ "$name" = "000.cpuhog" ]; then
+	taskset -c $core perf stat -e instructions:u -o C$core.$name.perf ./cpuhog &
+    else
+	taskset -c $core perf stat -e instructions:u -o C$core.$name.perf /ssd/cpu2006/bin/specinvoke -d /ssd/cpu2006/benchspec/CPU2006/$name/run/run_base_ref_gcc43-32bit.0000 -e speccmds.err -o speccmds.stdout -f speccmds.cmd -C -q &
+    fi
+}
+
+do_exp_4core()
+{
+    check_root
+
+    echo "" > /sys/kernel/debug/tracing/trace
+
+    run_bench $1 0
+    run_bench $2 1
+    run_bench $3 2
+    run_bench $4 3
+
+    echo $1 $2 $3 $4 >> $outputfile
+    sleep 10
+    echo sending kill signal
+    kill -9 `ps x | grep gcc | grep -v perf | awk '{ print $1 }'`
+    kill -9 `ps x | grep gcc | grep -v perf | awk '{ print $1 }'`
+    killall -9 fps bandwidth latency cpuhog
+    cat /sys/kernel/debug/tracing/trace > $1.$2.$3.$4.trace
+
+    s1=`parse_log C0.$1.perf`
+    s2=`parse_log C1.$2.perf`
+    s3=`parse_log C2.$3.perf`
+    s4=`parse_log C3.$4.perf`
+
+    echo $s1 $s2 $s3 $s4 >> $outputfile
+    echo $s1 $s2 $s3 $s4
+    echo " " >> $outputfile
+    chown heechul.heechul $outputfile *.trace
+    chmod +w $outputfile
+    sync
+}
+
+do_exp()
+{
+    corea=$1
+    coreb=$2
+
+    check_root
+
+    for b in $benchb; do
+	echo $b vs $bencha
+	echo "" > /sys/kernel/debug/tracing/trace
+	for ca in $corea; do
+	    if [ "$bencha" = "000.bandwidth" ]; then
+		perf stat -e instructions:u -o A$ca.$bencha.$b.perf ./bandwidth -a read -c $ca -t 10 &
+	    elif [ "$bencha" = "000.cpuhog" ]; then
+		echo "run cpuhog"
+		taskset -c $ca ./cpuhog &
+	    else
+		taskset -c $ca perf stat -e instructions:u -o A$ca.$bencha.$b.perf /ssd/cpu2006/bin/specinvoke -d /ssd/cpu2006/benchspec/CPU2006/$bencha/run/run_base_ref_gcc43-32bit.0000 -e speccmds.err -o speccmds.stdout -f speccmds.cmd -C -q &
+	    fi
+	done
+	for cb in $coreb; do
+	    if [ "$benchb" = "000.bandwidth" ]; then
+		perf stat -e instructions:u -o B$cb.$b.$bencha.perf ./bandwidth -a read -c $cb -t 10 &
+	    elif [ "$benchb" = "000.cpuhog" ]; then
+		taskset -c $cb ./cpuhog &
+	    else
+		taskset -c $cb perf stat -e instructions:u -o B$cb.$b.$bencha.perf /ssd/cpu2006/bin/specinvoke -d /ssd/cpu2006/benchspec/CPU2006/$b/run/run_base_ref_gcc43-32bit.0000 -e speccmds.err -o speccmds.stdout -f speccmds.cmd -C -q &
+	    fi
+	done
+
+	sleep 10
+	echo sending kill signal
+	kill -9 `ps x | grep gcc | grep -v perf | awk '{ print $1 }'`
+	kill -9 `ps x | grep gcc | grep -v perf | awk '{ print $1 }'`
+	killall -9 fps bandwidth latency cpuhog
+	cat /sys/kernel/debug/tracing/trace > $b.$bencha.trace
+	sleep 1
+	done_a=""
+	for ca in $corea; do
+	    str=`parse_log A$ca.$bencha.$b.perf`
+	    done_a="$done_a $str"
+	done
+	done_b=""
+	for cb in $coreb; do
+	    str=`parse_log B$cb.$b.$bencha.perf`
+	    done_b="$done_b $str"
+	done
+	echo $done_a "|" $done_b
+	echo $done_a $done_b >> $outputfile
+	cat /sys/kernel/debug/memsched/failcnt
+	# cat /sys/kernel/debug/memsched/failcnt | grep throttle >> $outputfile
+	cat /sys/kernel/debug/memsched/failcnt > 2corerun-$b.$bencha.txt
+    done
+    cat /sys/kernel/debug/memsched/failcnt | grep throttle >> $outputfile
+    echo " " >> $outputfile
+    chown heechul.heechul $outputfile *.trace
+    chmod +w $outputfile
+    sync
+}
+
+stop_services()
+{
+    check_root
+    service stop mysql
+    service stop apache2
+    dropbox stop
+}
+
+init_system()
+{
+    echo "one time things"
+    echo 8 8 8 8 > /proc/sys/kernel/printk
+    echo 2048 > /sys/kernel/debug/tracing/buffer_size_kb
+    export PATH=$HOME/bin:$PATH
+    init_cgroup
+    stop_services
+    check_root
+    rmmod memsched
+} > /dev/null
