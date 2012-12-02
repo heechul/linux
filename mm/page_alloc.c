@@ -58,10 +58,99 @@
 #include <linux/prefetch.h>
 #include <linux/migrate.h>
 #include <linux/page-debug-flags.h>
-
+#include <linux/debugfs.h>
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
 #include "internal.h"
+
+#define CONFIG_COLOR_PAGE_ALLOC 1
+#ifdef CONFIG_COLOR_PAGE_ALLOC
+int memdbg_enable = 0;
+EXPORT_SYMBOL(memdbg_enable);
+
+#define memdbg(fmt, ...)                                        \
+        do {                                                    \
+	if(memdbg_enable)                               \
+		trace_printk(fmt, ##__VA_ARGS__);       \
+        } while(0)
+
+static struct {
+        u32 enabled;
+        struct {
+                unsigned long mask;
+                unsigned long pattern;
+        } core[NR_CPUS];
+} color_page_alloc;
+
+static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf,
+				      size_t cnt, loff_t *ppos)
+{
+        char buf[64];
+        int core;
+        unsigned long mask, pattern;
+
+        if (cnt > 63) cnt = 63;
+        if (copy_from_user(&buf, ubuf, cnt))
+                return -EFAULT;
+
+        sscanf(buf, "%d %ld %ld\n", &core, &mask, &pattern);
+
+        if (core >= NR_CPUS)
+                return -EFAULT;
+
+	color_page_alloc.core[core].mask = mask;
+        color_page_alloc.core[core].pattern = pattern;
+
+        *ppos += cnt;
+        return cnt;
+}
+
+static int color_page_alloc_show(struct seq_file *m, void *v)
+{
+        int i;
+        seq_printf(m, "core | mask      | pattern\n");
+        for_each_online_cpu(i) {
+                seq_printf(m, "%4d   0x%08lx  0x%08lx\n", i,
+                           color_page_alloc.core[i].mask,
+                           color_page_alloc.core[i].pattern);
+        }
+        return 0;
+}
+static int color_page_alloc_open(struct inode *inode, struct file *filp)
+{
+        return single_open(filp, color_page_alloc_show, NULL);
+}
+
+static const struct file_operations color_page_alloc_fops = {
+        .open           = color_page_alloc_open,
+        .write          = color_page_alloc_write,
+        .read           = seq_read,
+        .llseek         = seq_lseek,
+        .release        = single_release,
+};
+
+static int __init color_page_alloc_debugfs(void)
+{
+        umode_t mode = S_IFREG | S_IRUSR | S_IWUSR;
+        struct dentry *dir;
+        dir = debugfs_create_dir("color_page_alloc", NULL);
+        if (!dir)
+                return PTR_ERR(dir);
+        if (!debugfs_create_bool("enable", mode, dir, &color_page_alloc.enabled))
+                goto fail;
+        if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
+                goto fail;
+        if (!debugfs_create_file("core", mode, dir, NULL, &color_page_alloc_fops))
+                goto fail;
+        return 0;
+fail:
+        debugfs_remove_recursive(dir);
+        return -ENOMEM;
+}
+
+late_initcall(color_page_alloc_debugfs);
+
+#endif /* CONFIG_COLOR_PAGE_ALLOC */
 
 #ifdef CONFIG_USE_PERCPU_NUMA_NODE_ID
 DEFINE_PER_CPU(int, numa_node);
@@ -862,10 +951,133 @@ static int prep_new_page(struct page *page, int order, gfp_t gfp_flags)
 	return 0;
 }
 
+#ifdef CONFIG_COLOR_PAGE_ALLOC
+/*
+ * This function perform the buddy system structure expansion given that an arbitrary
+ * page of the buddy set has been taken (not necessarely the first one)
+ * Note that expand_index has the same behavior of expand when index = 0
+ */
+static inline void expand_index(struct zone *zone, struct page * start_page,
+				int low, int high, struct free_area * area,
+				int migratetype, int index)
+{
+	/* For now, lets assume that low = 0 i.e. we allocate one page at a time*/
+	unsigned int size = 1 << high;
+
+	while(high > low){
+		high--;
+		area--;
+		size >>= 1;
+		if( index >= size ){
+			//Expand left side of the buddy
+			list_add(&start_page[0].lru, &area->free_list[migratetype]);
+			area->nr_free++;
+			set_page_order(&start_page[0], high);
+			//In this case, we have to move the start to the second half
+			start_page = &start_page[size];
+			index -= size;
+		} else {
+			//Expand the right side of the buddy
+			list_add(&start_page[size].lru, &area->free_list[migratetype]);
+			area->nr_free++;
+			set_page_order(&start_page[size], high);
+		}
+	}
+}
+
 /*
  * Go through the free lists for the given migratetype and remove
  * the smallest available page from the freelists
  */
+static inline
+struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
+						int migratetype)
+{
+        unsigned int current_order;
+        struct free_area * area;
+        struct page *page = NULL;
+        struct list_head *curr;
+        int index = -1;
+        unsigned long pfn = 0;
+
+        /* Find a page of the appropriate size in the preferred list */
+        /* We must also care about pattern compliance */
+        for (current_order = order; current_order < MAX_ORDER; ++current_order) {
+                area = &(zone->free_area[current_order]);
+
+                if (list_empty(&area->free_list[migratetype]))
+                        continue;
+
+                /*
+                 * Avoid useless calcualtion and rollback to the
+                 * physically unaware version if phpmask == 0
+                 */
+                if(color_page_alloc.enabled &&
+                   cpumask_weight(&current->cpus_allowed) != num_online_cpus())
+                {
+                        int iters = 0;
+                        unsigned long phmask = 0;
+                        unsigned long phpattern = 0;
+
+                        /*
+                        memdbg("[color] cpu%d zone %s wmt %d current(%s)\n",
+                               smp_processor_id(), zone->name, migratetype,
+                                current->comm);
+			*/
+                        list_for_each(curr, &area->free_list[migratetype]) {
+                                int i;
+                                page = list_entry(curr, struct page, lru);
+                                pfn = page_to_pfn(page);
+                                for_each_cpu(i, &current->cpus_allowed) {
+                                        /* TODO: this doesn't seem correct.
+                                           pattern and mask must match ALL constrainsts
+                                           but this code seems to ok satisfying one
+					*/
+                                        phmask = color_page_alloc.core[i].mask;
+                                        phpattern = color_page_alloc.core[i].pattern;
+                                        phmask &= (~0) << current_order;
+                                        iters++;
+                                        if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
+                                                /* We have found a compliant page.
+                                                   Let's determine the index */
+                                                index = phpattern & 
+							((1<<current_order) - 1);
+                                                /* page = &page[index]; */
+                                                break;
+                                        }
+                                }
+                                if(index >= 0) break;
+                        }
+		
+			/* Nothing found in this area. Let's move to the next one */
+			if(index < 0) continue;
+		
+			memdbg("Found match order %d/%d pfn 0x%08lx idx %d iters %d\n",
+			       order, current_order,
+			       page_to_pfn(&page[index]), index, iters);
+		} else {
+			page = list_entry(area->free_list[migratetype].next,
+					  struct page, lru);
+			index = 0;
+		}
+		
+		if (current_order >= MAX_ORDER) {
+			printk(KERN_ERR "no matching page among free pages\n");
+			return NULL;
+		}
+		
+		list_del(&page->lru);
+		rmv_page_order(page);
+		area->nr_free--;
+		expand_index(zone, page, order, current_order, 
+			     area, migratetype, index);
+		return &page[index];
+	}
+	return NULL;
+}
+
+#else /* !CONFIG_COLOR_PAGE_ALLOC */
+
 static inline
 struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						int migratetype)
@@ -891,7 +1103,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 	return NULL;
 }
-
+#endif /* CONFIG_COLOR_PAGE_ALLOC */
 
 /*
  * This array describes the order lists are fallen back to when
