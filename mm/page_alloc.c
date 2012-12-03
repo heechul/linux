@@ -108,9 +108,9 @@ static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf
 static int color_page_alloc_show(struct seq_file *m, void *v)
 {
         int i;
-        seq_printf(m, "core | mask      | pattern\n");
+        seq_printf(m, "core | mask   | pattern\n");
         for_each_online_cpu(i) {
-                seq_printf(m, "%4d   0x%08lx  0x%08lx\n", i,
+                seq_printf(m, "%4d   0x%05lx  0x%05lx\n", i,
                            color_page_alloc.core[i].mask,
                            color_page_alloc.core[i].pattern);
         }
