@@ -1655,7 +1655,9 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 	int cold = !!(gfp_flags & __GFP_COLD);
 
 again:
-	if (likely(order == 0)) {
+	if (likely(order == 0) && 
+	    !(color_page_alloc.enabled && 
+	      cpumask_weight(&current->cpus_allowed) != num_online_cpus())) {
 		struct per_cpu_pages *pcp;
 		struct list_head *list;
 
