@@ -76,6 +76,7 @@ EXPORT_SYMBOL(memdbg_enable);
 
 static struct {
         u32 enabled;
+	int colors;
         struct {
                 unsigned long mask;
                 unsigned long pattern;
@@ -137,6 +138,8 @@ static int __init color_page_alloc_debugfs(void)
         if (!dir)
                 return PTR_ERR(dir);
         if (!debugfs_create_bool("enable", mode, dir, &color_page_alloc.enabled))
+                goto fail;
+        if (!debugfs_create_u32("colors", mode, dir, &color_page_alloc.colors))
                 goto fail;
         if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
                 goto fail;
@@ -1052,9 +1055,11 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			/* Nothing found in this area. Let's move to the next one */
 			if(index < 0) continue;
 		
-			memdbg("Found match order %d/%d pfn 0x%08lx idx %d iters %d\n",
+			memdbg("Matched order %d/%d pfn 0x%08lx color %d iters %d\n",
 			       order, current_order,
-			       page_to_pfn(&page[index]), index, iters);
+			       page_to_pfn(&page[index]),
+			       (int)(pfn % color_page_alloc.colors), 
+			       iters);
 		} else {
 			page = list_entry(area->free_list[migratetype].next,
 					  struct page, lru);
