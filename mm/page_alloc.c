@@ -1074,9 +1074,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		list_del(&page->lru);
 		rmv_page_order(page);
 		area->nr_free--;
-		expand_index(zone, page, order, current_order, 
-			     area, migratetype, index);
-		return &page[index];
+		expand(zone, page, order, current_order, area, migratetype);
+		return page;
 	}
 	return NULL;
 }
