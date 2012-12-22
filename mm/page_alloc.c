@@ -1038,7 +1038,6 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 					*/
                                         phmask = color_page_alloc.core[i].mask;
                                         phpattern = color_page_alloc.core[i].pattern;
-                                        phmask &= (~0) << current_order;
                                         iters++;
                                         if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
                                                 /* We have found a compliant page.
@@ -1056,9 +1055,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			if(index < 0) continue;
 		
 			memdbg("Matched order %d/%d pfn 0x%08lx color %d iters %d\n",
-			       order, current_order,
-			       page_to_pfn(&page[index]),
-			       (int)(pfn % color_page_alloc.colors), 
+			       order, current_order, pfn,
+			       (int)(pfn % color_page_alloc.colors),
 			       iters);
 		} else {
 			page = list_entry(area->free_list[migratetype].next,
