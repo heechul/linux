@@ -81,6 +81,12 @@ static struct {
                 unsigned long mask;
                 unsigned long pattern;
         } core[NR_CPUS];
+	struct {
+		u64 max_ns;
+		u64 min_ns;
+		u64 tot_ns;
+		u64 tot_cnt;
+	} stat;
 } color_page_alloc;
 
 static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf,
@@ -109,12 +115,20 @@ static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf
 static int color_page_alloc_show(struct seq_file *m, void *v)
 {
         int i;
+
         seq_printf(m, "core | mask   | pattern\n");
         for_each_online_cpu(i) {
                 seq_printf(m, "%4d   0x%05lx  0x%05lx\n", i,
                            color_page_alloc.core[i].mask,
                            color_page_alloc.core[i].pattern);
         }
+	seq_printf(m, "statistics\n");
+	seq_printf(m, "  min/max/avg/tot: %lld %lld %lld %lld\n",
+		   color_page_alloc.stat.min_ns,
+		   color_page_alloc.stat.max_ns,
+		   (color_page_alloc.stat.tot_cnt) ? 
+		   div64_u64(color_page_alloc.stat.tot_ns, color_page_alloc.stat.tot_cnt) : 0,
+		   color_page_alloc.stat.tot_cnt);
         return 0;
 }
 static int color_page_alloc_open(struct inode *inode, struct file *filp)
@@ -135,6 +149,11 @@ static int __init color_page_alloc_debugfs(void)
         umode_t mode = S_IFREG | S_IRUSR | S_IWUSR;
         struct dentry *dir;
         dir = debugfs_create_dir("color_page_alloc", NULL);
+
+	/* statistics initialization */
+	color_page_alloc.stat.min_ns = 0xffffffff;
+	color_page_alloc.stat.max_ns = 0;
+
         if (!dir)
                 return PTR_ERR(dir);
         if (!debugfs_create_bool("enable", mode, dir, &color_page_alloc.enabled))
@@ -1002,6 +1021,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
         struct list_head *curr;
         int index = -1;
         unsigned long pfn = 0;
+	int iters = 0;
+	ktime_t start, duration;
 
         /* Find a page of the appropriate size in the preferred list */
         /* We must also care about pattern compliance */
@@ -1018,57 +1039,56 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
                 if(color_page_alloc.enabled &&
                    cpumask_weight(&current->cpus_allowed) != num_online_cpus())
                 {
-                        int iters = 0;
                         unsigned long phmask = 0;
                         unsigned long phpattern = 0;
 
-                        /*
-                        memdbg("[color] cpu%d zone %s wmt %d current(%s)\n",
-                               smp_processor_id(), zone->name, migratetype,
-                                current->comm);
-			*/
+			if (iters == 0)
+				start = ktime_get();
+
                         list_for_each(curr, &area->free_list[migratetype]) {
                                 int i;
                                 page = list_entry(curr, struct page, lru);
                                 pfn = page_to_pfn(page);
                                 for_each_cpu(i, &current->cpus_allowed) {
-                                        /* TODO: this doesn't seem correct.
-                                           pattern and mask must match ALL constrainsts
-                                           but this code seems to ok satisfying one
-					*/
                                         phmask = color_page_alloc.core[i].mask;
                                         phpattern = color_page_alloc.core[i].pattern;
                                         iters++;
                                         if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
-                                                /* We have found a compliant page.
-                                                   Let's determine the index */
-                                                index = phpattern & 
-							((1<<current_order) - 1);
-                                                /* page = &page[index]; */
+                                                /* found a compliant page. */
+						index = 1;
                                                 break;
                                         }
                                 }
                                 if(index >= 0) break;
                         }
-		
+
 			/* Nothing found in this area. Let's move to the next one */
 			if(index < 0) continue;
-		
-			memdbg("Matched order %d/%d pfn 0x%08lx color %d iters %d\n",
+
+			duration = ktime_sub(ktime_get(), start);
+			memdbg("Matched order %d/%d pfn 0x%08lx color %d iters %d in %lld ns\n",
 			       order, current_order, pfn,
 			       (int)(pfn % color_page_alloc.colors),
-			       iters);
+			       iters, duration.tv64 );
+
+			/* update statistics */
+			color_page_alloc.stat.min_ns = min(duration.tv64, color_page_alloc.stat.min_ns);
+			color_page_alloc.stat.max_ns = max(duration.tv64, color_page_alloc.stat.max_ns);
+			color_page_alloc.stat.tot_ns += duration.tv64;
+			color_page_alloc.stat.tot_cnt++;
 		} else {
 			page = list_entry(area->free_list[migratetype].next,
 					  struct page, lru);
 			index = 0;
 		}
-		
+
 		if (current_order >= MAX_ORDER) {
-			printk(KERN_ERR "no matching page among free pages\n");
+			duration = ktime_sub(ktime_get(), start);
+			printk(KERN_ERR "no matching page among free pages in %lld ns\n",
+				duration.tv64);
 			return NULL;
 		}
-		
+
 		list_del(&page->lru);
 		rmv_page_order(page);
 		area->nr_free--;
