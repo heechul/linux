@@ -63,6 +63,10 @@
 #include <asm/div64.h>
 #include "internal.h"
 
+#ifdef CONFIG_CGROUP_PHDUSA
+#include <linux/phdusa.h>
+#endif
+
 #define CONFIG_COLOR_PAGE_ALLOC 1
 #ifdef CONFIG_COLOR_PAGE_ALLOC
 int memdbg_enable = 0;
@@ -156,7 +160,7 @@ static int __init color_page_alloc_debugfs(void)
 
         if (!dir)
                 return PTR_ERR(dir);
-        if (!debugfs_create_bool("enable", mode, dir, &color_page_alloc.enabled))
+        if (!debugfs_create_u32("enable", mode, dir, &color_page_alloc.enabled))
                 goto fail;
         if (!debugfs_create_u32("colors", mode, dir, &color_page_alloc.colors))
                 goto fail;
@@ -1024,6 +1028,11 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	int iters = 0;
 	ktime_t start, duration;
 
+	struct phdusa *phinfo_str;
+
+	phinfo_str = ph_from_subsys(current->cgroups->
+				    subsys[phdusa_subsys_id]);
+
         /* Find a page of the appropriate size in the preferred list */
         /* We must also care about pattern compliance */
         for (current_order = order; current_order < MAX_ORDER; ++current_order) {
@@ -1036,7 +1045,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
                  * Avoid useless calcualtion and rollback to the
                  * physically unaware version if phpmask == 0
                  */
-                if(color_page_alloc.enabled &&
+                if(color_page_alloc.enabled == 1 &&
                    cpumask_weight(&current->cpus_allowed) != num_online_cpus())
                 {
                         unsigned long phmask = 0;
@@ -1072,10 +1081,50 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			       iters, duration.tv64 );
 
 			/* update statistics */
-			color_page_alloc.stat.min_ns = min(duration.tv64, color_page_alloc.stat.min_ns);
-			color_page_alloc.stat.max_ns = max(duration.tv64, color_page_alloc.stat.max_ns);
+			color_page_alloc.stat.min_ns = 
+				min(duration.tv64, color_page_alloc.stat.min_ns);
+			color_page_alloc.stat.max_ns = 
+				max(duration.tv64, color_page_alloc.stat.max_ns);
 			color_page_alloc.stat.tot_ns += duration.tv64;
 			color_page_alloc.stat.tot_cnt++;
+		} else if (color_page_alloc.enabled == 2 && !list_empty(&phinfo_str->policy)) {
+			/* use cgroup interface */
+                        unsigned long phmask = 0;
+                        unsigned long phpattern = 0;
+
+			if (iters == 0)
+				start = ktime_get();
+
+                        list_for_each(curr, &area->free_list[migratetype]) {
+                                int i;
+				struct phinfo *phentry;
+				struct list_head *pos;
+
+                                page = list_entry(curr, struct page, lru);
+                                pfn = page_to_pfn(page);
+
+                                list_for_each(pos, &phinfo_str->policy) {
+					phentry = list_entry(pos, struct phinfo, list);
+					phmask = phentry->phmask;
+					phpattern = phentry->phpattern;
+                                        iters++;
+                                        if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
+                                                /* found a compliant page. */
+						index = 1;
+                                                break;
+                                        }
+                                }
+                                if(index >= 0) break;
+                        }
+
+			/* Nothing found in this area. Let's move to the next one */
+			if(index < 0) continue;
+
+			duration = ktime_sub(ktime_get(), start);
+			memdbg("cgroup order %d/%d pfn 0x%08lx color %d iters %d in %lld ns\n",
+			       order, current_order, pfn,
+			       (int)(pfn % color_page_alloc.colors),
+			       iters, duration.tv64 );
 		} else {
 			page = list_entry(area->free_list[migratetype].next,
 					  struct page, lru);

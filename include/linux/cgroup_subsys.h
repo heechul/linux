@@ -78,3 +78,7 @@ SUBSYS(hugetlb)
 #endif
 
 /* */
+
+#ifdef CONFIG_CGROUP_PHDUSA
+SUBSYS(phdusa)
+#endif
