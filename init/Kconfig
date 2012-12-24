@@ -855,6 +855,12 @@ config DEBUG_BLK_CGROUP
 	Enable some debugging help. Currently it exports additional stat
 	files in a cgroup which can be useful for debugging.
 
+config CGROUP_PHDUSA
+	bool "Enable Physical Driven User Space Allocator"
+	help
+	  Enables PhDUSA, a low-level physical page allocator that gives
+	  user control over the physical pages allocated to a process.
+
 endif # CGROUPS
 
 config CHECKPOINT_RESTORE
