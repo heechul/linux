@@ -78,6 +78,12 @@ EXPORT_SYMBOL(memdbg_enable);
 		trace_printk(fmt, ##__VA_ARGS__);       \
         } while(0)
 
+#define memdbg2(lvl, fmt, ...)					\
+        do {                                                    \
+	if(memdbg_enable >= lvl)                               \
+		trace_printk(fmt, ##__VA_ARGS__);       \
+        } while(0)
+
 static struct {
         u32 enabled;
 	int colors;
@@ -1065,6 +1071,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
                                         if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
                                                 /* found a compliant page. */
 						index = 1;
+						memdbg2(3, "i=%d pfn=0x%lx mask=0x%lx pattern=0x%lx\n",
+							i, pfn, phmask, phpattern);
                                                 break;
                                         }
                                 }
@@ -1111,6 +1119,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
                                         if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
                                                 /* found a compliant page. */
 						index = 1;
+						memdbg2(3, "entry=0x%lx pfn=0x%lx mask=0x%lx pattern=0x%lx\n",
+							(unsigned long)phentry, pfn, phmask, phpattern);
                                                 break;
                                         }
                                 }
