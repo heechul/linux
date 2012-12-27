@@ -1125,6 +1125,15 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			       order, current_order, pfn,
 			       (int)(pfn % color_page_alloc.colors),
 			       iters, duration.tv64 );
+
+			/* update statistics */
+			color_page_alloc.stat.min_ns = 
+				min(duration.tv64, color_page_alloc.stat.min_ns);
+			color_page_alloc.stat.max_ns = 
+				max(duration.tv64, color_page_alloc.stat.max_ns);
+			color_page_alloc.stat.tot_ns += duration.tv64;
+			color_page_alloc.stat.tot_cnt++;
+
 		} else {
 			page = list_entry(area->free_list[migratetype].next,
 					  struct page, lru);
