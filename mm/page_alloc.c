@@ -1052,6 +1052,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
                  * physically unaware version if phpmask == 0
                  */
                 if(color_page_alloc.enabled == 1 &&
+		   order == 0 &&
                    cpumask_weight(&current->cpus_allowed) != num_online_cpus())
                 {
                         unsigned long phmask = 0;
@@ -1067,10 +1068,13 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
                                 for_each_cpu(i, &current->cpus_allowed) {
                                         phmask = color_page_alloc.core[i].mask;
                                         phpattern = color_page_alloc.core[i].pattern;
+					phmask &= (~0) << current_order;
                                         iters++;
                                         if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
                                                 /* found a compliant page. */
-						index = 1;
+						index = phpattern &
+                                                        ((1<<current_order) - 1);
+
 						memdbg2(3, "i=%d pfn=0x%lx mask=0x%lx pattern=0x%lx\n",
 							i, pfn, phmask, phpattern);
                                                 break;
@@ -1084,8 +1088,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 			duration = ktime_sub(ktime_get(), start);
 			memdbg("Matched order %d/%d pfn 0x%08lx color %d iters %d in %lld ns\n",
-			       order, current_order, pfn,
-			       (int)(pfn % color_page_alloc.colors),
+			       order, current_order, pfn+index,
+			       (int)((pfn + index)% color_page_alloc.colors),
 			       iters, duration.tv64 );
 
 			/* update statistics */
@@ -1095,7 +1099,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				max(duration.tv64, color_page_alloc.stat.max_ns);
 			color_page_alloc.stat.tot_ns += duration.tv64;
 			color_page_alloc.stat.tot_cnt++;
-		} else if (color_page_alloc.enabled == 2 && !list_empty(&phinfo_str->policy)) {
+		} else if (color_page_alloc.enabled == 2 && 
+			   order == 0 &&
+			   !list_empty(&phinfo_str->policy)) {
 			/* use cgroup interface */
                         unsigned long phmask = 0;
                         unsigned long phpattern = 0;
@@ -1115,12 +1121,15 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 					phentry = list_entry(pos, struct phinfo, list);
 					phmask = phentry->phmask;
 					phpattern = phentry->phpattern;
+					phmask &= (~0) << current_order;
                                         iters++;
                                         if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
                                                 /* found a compliant page. */
-						index = 1;
-						memdbg2(3, "entry=0x%lx pfn=0x%lx mask=0x%lx pattern=0x%lx\n",
-							(unsigned long)phentry, pfn, phmask, phpattern);
+						index = phpattern &
+                                                        ((1<<current_order) - 1);
+
+						memdbg2(3, "pfn=0x%lx index=%d mask=0x%lx pattern=0x%lx\n",
+							pfn, index, phmask, phpattern);
                                                 break;
                                         }
                                 }
@@ -1132,8 +1141,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 			duration = ktime_sub(ktime_get(), start);
 			memdbg("cgroup order %d/%d pfn 0x%08lx color %d iters %d in %lld ns\n",
-			       order, current_order, pfn,
-			       (int)(pfn % color_page_alloc.colors),
+			       order, current_order, pfn+index,
+			       (int)((pfn + index) % color_page_alloc.colors),
 			       iters, duration.tv64 );
 
 			/* update statistics */
@@ -1160,8 +1169,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		list_del(&page->lru);
 		rmv_page_order(page);
 		area->nr_free--;
-		expand(zone, page, order, current_order, area, migratetype);
-		return page;
+                expand_index(zone, page, order, current_order,
+                             area, migratetype, index);
+                return &page[index];
 	}
 	return NULL;
 }
