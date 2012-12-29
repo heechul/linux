@@ -1126,18 +1126,22 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
                                 page = list_entry(curr, struct page, lru);
                                 pfn = page_to_pfn(page);
 
+				memdbg2(3, "- %d: pfn 0x%lx order %d (color=%d)\n", iters, pfn,
+					current_order, 
+					(current_order == 0) ? (pfn % color_page_alloc.colors) : -1);
+
+				iters++;
                                 list_for_each(pos, &phinfo_str->policy) {
 					phentry = list_entry(pos, struct phinfo, list);
 					phmask = phentry->phmask;
 					phpattern = phentry->phpattern;
 					phmask &= (~0) << current_order;
-                                        iters++;
                                         if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
                                                 /* found a compliant page. */
 						index = phpattern &
                                                         ((1<<current_order) - 1);
 
-						memdbg2(3, "pfn=0x%lx index=%d mask=0x%lx pattern=0x%lx\n",
+						memdbg2(3, "-- pfn 0x%lx index %d (mask=0x%lx pattern=0x%lx)\n",
 							pfn, index, phmask, phpattern);
                                                 break;
                                         }
