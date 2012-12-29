@@ -11,6 +11,7 @@
 #include <linux/phdusa.h>
 #include <linux/mm.h>
 #include <linux/err.h>
+#include <linux/fs.h>
 
 /*
  * Policy compliancy checking procedure
@@ -78,6 +79,41 @@ struct phdusa * ph_from_subsys(struct cgroup_subsys_state * subsys)
 {
 	return container_of(subsys, struct phdusa, css);
 }
+
+/* refer cpuset.c for handling read/write */
+static ssize_t phdusa_file_read(struct cgroup *cgrp, 
+				struct cftype *cfg,
+				struct file *file,
+				char __user *buf,
+				size_t nbytes, 
+				loff_t *ppos)
+{
+	struct phdusa *ph = cgroup_ph(cgrp);
+	struct list_head *curr;
+	char *page;
+	ssize_t retval = 0;
+	char *s;
+
+	printk(KERN_INFO "Reading policy list from cgroup - %p\n", cgrp);
+
+	if (!(page = (char *)__get_free_page(GFP_TEMPORARY)))
+		return -ENOMEM;
+
+	s = page;
+
+	list_for_each(curr, &ph->policy) {
+		struct phinfo *info;
+		info = list_entry(curr, struct phinfo, list);
+		s += sprintf(s, "0x%08lx 0x%08lx\n", info->phmask, info->phpattern);
+	}
+
+	*s++ = '\n';
+
+	retval = simple_read_from_buffer(buf, nbytes, ppos, page, s - page);
+	free_page((unsigned long)page);
+	return retval;
+}
+
 
 static void update_phpattern(struct phdusa* ph, u64 val)
 {
@@ -164,6 +200,11 @@ static u64 phdusa_common_file_read(struct cgroup *cgrp,
  */
 
 static struct cftype files[] = {
+	{
+		.name = "control",
+		.read = phdusa_file_read,
+		.private = 0,
+	},
 	{
 		.name = "phys_pattern",
 		.read_u64 = phdusa_common_file_read,

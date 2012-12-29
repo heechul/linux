@@ -110,6 +110,14 @@ static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf
         if (copy_from_user(&buf, ubuf, cnt))
                 return -EFAULT;
 
+	if (!strncmp(buf, "reset", 5)) {
+		printk(KERN_INFO "reset statistics...\n");
+		color_page_alloc.stat.min_ns = 0xffffffff;
+		color_page_alloc.stat.max_ns = 0;
+		color_page_alloc.stat.tot_ns = 0;
+		color_page_alloc.stat.tot_cnt = 0;
+		goto out;
+	}
         sscanf(buf, "%d %ld %ld\n", &core, &mask, &pattern);
 
         if (core >= NR_CPUS)
@@ -118,6 +126,7 @@ static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf
 	color_page_alloc.core[core].mask = mask;
         color_page_alloc.core[core].pattern = pattern;
 
+out:
         *ppos += cnt;
         return cnt;
 }
