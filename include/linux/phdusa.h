@@ -13,33 +13,16 @@
 
 #ifdef CONFIG_CGROUP_PHDUSA
 
-struct phinfo {
-	unsigned long phpattern; /* pattern of the physical page */
-	unsigned long phmask;	 /* bitmask for the pattern */
-        struct list_head list;	 /* allow several patterns */
-};
-
 struct phdusa {
-       struct cgroup_subsys_state css;
-       struct list_head policy;
+	struct cgroup_subsys_state css;
+	unsigned long colormap; /* allowed color bitmap.  */
 };
-
 
 /* Retrieve the phdusa group corresponding to this cgroup container */
 struct phdusa *cgroup_ph(struct cgroup *cgrp);
 
 /* Retrieve the phdusa group corresponding to this subsys */
 struct phdusa * ph_from_subsys(struct cgroup_subsys_state * subsys);
-
-/*
- * Policy compliancy checking procedure
- */
-int check_policy_page(struct list_head * phinfo, struct page * page);
-
-/*
- * Check of a page is compliant to the policy defined for the given vma
- */
-int check_policy_vma(struct page * page, struct vm_area_struct * vma);
 
 #endif /* CONFIG_CGROUP_PHDUSA */
 

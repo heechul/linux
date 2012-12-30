@@ -65,46 +65,33 @@
 
 #ifdef CONFIG_CGROUP_PHDUSA
 #include <linux/phdusa.h>
-#endif
 
-#define CONFIG_COLOR_PAGE_ALLOC 1
-#ifdef CONFIG_COLOR_PAGE_ALLOC
 int memdbg_enable = 0;
 EXPORT_SYMBOL(memdbg_enable);
 
-#define memdbg(fmt, ...)                                        \
+#define memdbg(lvl, fmt, ...)					\
         do {                                                    \
-	if(memdbg_enable)                               \
-		trace_printk(fmt, ##__VA_ARGS__);       \
+		if(memdbg_enable >= lvl)			\
+			trace_printk(fmt, ##__VA_ARGS__);       \
         } while(0)
 
-#define memdbg2(lvl, fmt, ...)					\
-        do {                                                    \
-	if(memdbg_enable >= lvl)                               \
-		trace_printk(fmt, ##__VA_ARGS__);       \
-        } while(0)
+struct color_stat {
+	s64 max_ns;
+	s64 min_ns;
+	s64 tot_ns;
+	s64 tot_cnt;
+};
 
 static struct {
         u32 enabled;
 	int colors;
-        struct {
-                unsigned long mask;
-                unsigned long pattern;
-        } core[NR_CPUS];
-	struct {
-		u64 max_ns;
-		u64 min_ns;
-		u64 tot_ns;
-		u64 tot_cnt;
-	} stat;
+	struct color_stat stat;
 } color_page_alloc;
 
 static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf,
 				      size_t cnt, loff_t *ppos)
 {
         char buf[64];
-        int core;
-        unsigned long mask, pattern;
 
         if (cnt > 63) cnt = 63;
         if (copy_from_user(&buf, ubuf, cnt))
@@ -118,14 +105,6 @@ static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf
 		color_page_alloc.stat.tot_cnt = 0;
 		goto out;
 	}
-        sscanf(buf, "%d %ld %ld\n", &core, &mask, &pattern);
-
-        if (core >= NR_CPUS)
-                return -EFAULT;
-
-	color_page_alloc.core[core].mask = mask;
-        color_page_alloc.core[core].pattern = pattern;
-
 out:
         *ppos += cnt;
         return cnt;
@@ -133,14 +112,6 @@ out:
 
 static int color_page_alloc_show(struct seq_file *m, void *v)
 {
-        int i;
-
-        seq_printf(m, "core | mask   | pattern\n");
-        for_each_online_cpu(i) {
-                seq_printf(m, "%4d   0x%05lx  0x%05lx\n", i,
-                           color_page_alloc.core[i].mask,
-                           color_page_alloc.core[i].pattern);
-        }
 	seq_printf(m, "statistics\n");
 	seq_printf(m, "  min/max/avg/tot: %lld %lld %lld %lld\n",
 		   color_page_alloc.stat.min_ns,
@@ -169,6 +140,8 @@ static int __init color_page_alloc_debugfs(void)
         struct dentry *dir;
         dir = debugfs_create_dir("color_page_alloc", NULL);
 
+	color_page_alloc.colors = 64; /* = LLC_SIZE / WAYS / 4K, TODO*/
+
 	/* statistics initialization */
 	color_page_alloc.stat.min_ns = 0xffffffff;
 	color_page_alloc.stat.max_ns = 0;
@@ -191,7 +164,7 @@ fail:
 
 late_initcall(color_page_alloc_debugfs);
 
-#endif /* CONFIG_COLOR_PAGE_ALLOC */
+#endif /* CONFIG_CGROUP_PHDUSA */
 
 #ifdef CONFIG_USE_PERCPU_NUMA_NODE_ID
 DEFINE_PER_CPU(int, numa_node);
@@ -992,7 +965,7 @@ static int prep_new_page(struct page *page, int order, gfp_t gfp_flags)
 	return 0;
 }
 
-#ifdef CONFIG_COLOR_PAGE_ALLOC
+#ifdef CONFIG_CGROUP_PHDUSA
 /*
  * This function perform the buddy system structure expansion given that an arbitrary
  * page of the buddy set has been taken (not necessarely the first one)
@@ -1037,159 +1010,112 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
         unsigned int current_order;
         struct free_area * area;
         struct page *page = NULL;
-        struct list_head *curr;
-        int index = -1;
         unsigned long pfn = 0;
+        struct list_head *curr, *tmp;
 	int iters = 0;
 	ktime_t start, duration;
+	struct phdusa *ph;
+	struct color_stat *stat = &color_page_alloc.stat;
+	int max_colors = (color_page_alloc.colors) ?
+		color_page_alloc.colors: MAX_CACHE_COLORS;
+	int use_color = 0;
+	int color;
 
-	struct phdusa *phinfo_str;
+	/* cgroup information */
+	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
+	if (ph && bitmap_weight(&ph->colormap, max_colors) > 0)
+		use_color = 1;
 
-	phinfo_str = ph_from_subsys(current->cgroups->
-				    subsys[phdusa_subsys_id]);
-
-        /* Find a page of the appropriate size in the preferred list */
-        /* We must also care about pattern compliance */
+	/* Find a page of the appropriate size in the preferred list */
         for (current_order = order; current_order < MAX_ORDER; ++current_order) {
-                area = &(zone->free_area[current_order]);
+		area = &(zone->free_area[current_order]);
 
-                if (list_empty(&area->free_list[migratetype]))
-                        continue;
-
-                /*
-                 * Avoid useless calcualtion and rollback to the
-                 * physically unaware version if phpmask == 0
-                 */
-                if(color_page_alloc.enabled == 1 &&
-		   order == 0 &&
-                   cpumask_weight(&current->cpus_allowed) != num_online_cpus())
-                {
-                        unsigned long phmask = 0;
-                        unsigned long phpattern = 0;
-
-			if (iters == 0)
-				start = ktime_get();
-
-                        list_for_each(curr, &area->free_list[migratetype]) {
-                                int i;
-                                page = list_entry(curr, struct page, lru);
-                                pfn = page_to_pfn(page);
-                                for_each_cpu(i, &current->cpus_allowed) {
-                                        phmask = color_page_alloc.core[i].mask;
-                                        phpattern = color_page_alloc.core[i].pattern;
-					phmask &= (~0) << current_order;
-                                        iters++;
-                                        if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
-                                                /* found a compliant page. */
-						index = phpattern &
-                                                        ((1<<current_order) - 1);
-
-						memdbg2(3, "i=%d pfn=0x%lx mask=0x%lx pattern=0x%lx\n",
-							i, pfn, phmask, phpattern);
-                                                break;
-                                        }
-                                }
-                                if(index >= 0) break;
-                        }
-
-			/* Nothing found in this area. Let's move to the next one */
-			if(index < 0) continue;
-
-			duration = ktime_sub(ktime_get(), start);
-			memdbg("Matched order %d/%d pfn 0x%08lx color %d iters %d in %lld ns\n",
-			       order, current_order, pfn+index,
-			       (int)((pfn + index)% color_page_alloc.colors),
-			       iters, duration.tv64 );
-
-			/* update statistics */
-			color_page_alloc.stat.min_ns = 
-				min(duration.tv64, color_page_alloc.stat.min_ns);
-			color_page_alloc.stat.max_ns = 
-				max(duration.tv64, color_page_alloc.stat.max_ns);
-			color_page_alloc.stat.tot_ns += duration.tv64;
-			color_page_alloc.stat.tot_cnt++;
-		} else if (color_page_alloc.enabled == 2 && 
-			   order == 0 &&
-			   !list_empty(&phinfo_str->policy)) {
-			/* use cgroup interface */
-                        unsigned long phmask = 0;
-                        unsigned long phpattern = 0;
-
-			if (iters == 0)
-				start = ktime_get();
-
-                        list_for_each(curr, &area->free_list[migratetype]) {
-                                int i;
-				struct phinfo *phentry;
-				struct list_head *pos;
-
-                                page = list_entry(curr, struct page, lru);
-                                pfn = page_to_pfn(page);
-
-				memdbg2(3, "- %d: pfn 0x%lx order %d (color=%d)\n", iters, pfn,
-					current_order, 
-					(current_order == 0) ? (pfn % color_page_alloc.colors) : -1);
-
-				iters++;
-                                list_for_each(pos, &phinfo_str->policy) {
-					phentry = list_entry(pos, struct phinfo, list);
-					phmask = phentry->phmask;
-					phpattern = phentry->phpattern;
-					phmask &= (~0) << current_order;
-                                        if(~(~(pfn ^ phpattern) | ~phmask) == 0) {
-                                                /* found a compliant page. */
-						index = phpattern &
-                                                        ((1<<current_order) - 1);
-
-						memdbg2(3, "-- pfn 0x%lx index %d (mask=0x%lx pattern=0x%lx)\n",
-							pfn, index, phmask, phpattern);
-                                                break;
-                                        }
-                                }
-                                if(index >= 0) break;
-                        }
-
-			/* Nothing found in this area. Let's move to the next one */
-			if(index < 0) continue;
-
-			duration = ktime_sub(ktime_get(), start);
-			memdbg("cgroup order %d/%d pfn 0x%08lx color %d iters %d in %lld ns\n",
-			       order, current_order, pfn+index,
-			       (int)((pfn + index) % color_page_alloc.colors),
-			       iters, duration.tv64 );
-
-			/* update statistics */
-			color_page_alloc.stat.min_ns = 
-				min(duration.tv64, color_page_alloc.stat.min_ns);
-			color_page_alloc.stat.max_ns = 
-				max(duration.tv64, color_page_alloc.stat.max_ns);
-			color_page_alloc.stat.tot_ns += duration.tv64;
-			color_page_alloc.stat.tot_cnt++;
-
-		} else {
+		/* normal allocation */
+		if (!use_color || order > 0) {
+			if (list_empty(&area->free_list[migratetype]))
+				continue;
 			page = list_entry(area->free_list[migratetype].next,
 					  struct page, lru);
-			index = 0;
+			goto found_page;
 		}
 
-		if (current_order >= MAX_ORDER) {
-			duration = ktime_sub(ktime_get(), start);
-			printk(KERN_ERR "no matching page among free pages in %lld ns\n",
-				duration.tv64);
-			return NULL;
-		}
+		if (iters == 0)	start = ktime_get();
 
+		/* colored page search */
+		if (current_order == 0) {
+			/* order-0 allication. e.g., page fault handling. */
+			
+			/* First, check if I have colored pages */
+			color = find_first_bit(&ph->colormap, max_colors);
+			while (color < max_colors) {
+				if (!list_empty(&area->color_list[migratetype][color])) {
+					page = list_entry(
+						area->color_list[migratetype][color].next,
+						struct page, lru);
+					memdbg(3, "- found in color %d list\n", color);
+					goto found_page_color;
+				}
+				color = find_next_bit(&ph->colormap, max_colors, color + 1);
+			}
+			
+			/* No luck. now let's iterate normal list */
+			list_for_each_safe(curr, tmp, &area->free_list[migratetype]) {
+				page  = list_entry(curr, struct page, lru);
+				pfn   = page_to_pfn(page);
+				color = pfn % max_colors;
+				if (test_bit(color, &ph->colormap)) {
+					/* found a matching page  */
+					memdbg(3, "- found in normal list\n");
+					goto found_page_color;
+				} else {
+					/* move curr to color list */
+					list_move(curr, &area->color_list[migratetype][color]);
+				}
+				iters ++;
+			}
+			/* Not in the current order. move on to the next order */
+			continue;
+		} else {
+			/* high order allocation. */
+			list_for_each(curr, &area->free_list[migratetype]) {
+				page  = list_entry(curr, struct page, lru);
+				pfn   = page_to_pfn(page);
+				color = pfn % max_colors;
+				/* TODO: bits: [color, color+2^current_order-1] */
+				if (test_bit(color, &ph->colormap)) {
+					/* found a matching page */
+					memdbg(3, "- found in order %d list\n",
+					       current_order);
+					goto found_page_color;
+				}
+				iters++;
+			}
+			/* Not in the current order. move on to the next order */
+			continue;
+		}
+	found_page_color:
+		duration = ktime_sub(ktime_get(), start);
+		memdbg(2, "order %d/%d pfn 0x%08lx color %d iters %d in %lld ns\n",
+		       order, current_order, pfn, (int)(pfn % max_colors),
+		       iters, duration.tv64);
+
+		/* update statistics */
+		stat->min_ns = min(duration.tv64, stat->min_ns);
+		stat->max_ns = max(duration.tv64, stat->max_ns);
+		stat->tot_ns += duration.tv64;
+		stat->tot_cnt++;
+		
+	found_page:
 		list_del(&page->lru);
 		rmv_page_order(page);
 		area->nr_free--;
-                expand_index(zone, page, order, current_order,
-                             area, migratetype, index);
-                return &page[index];
+		expand(zone, page, order, current_order, area, migratetype);
+		return page;
 	}
 	return NULL;
 }
 
-#else /* !CONFIG_COLOR_PAGE_ALLOC */
+#else /* !CONFIG_CGROUP_PHDUSA */
 
 static inline
 struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
@@ -1216,7 +1142,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 	return NULL;
 }
-#endif /* CONFIG_COLOR_PAGE_ALLOC */
+#endif /* CONFIG_CGROUP_PHDUSA */
 
 /*
  * This array describes the order lists are fallen back to when
@@ -4132,6 +4058,11 @@ static void __meminit zone_init_free_lists(struct zone *zone)
 {
 	int order, t;
 	for_each_migratetype_order(order, t) {
+#ifdef CONFIG_CGROUP_PHDUSA
+		int c;
+		for (c = 0; c < MAX_CACHE_COLORS; c++)
+			INIT_LIST_HEAD(&zone->free_area[order].color_list[t][c]);
+#endif
 		INIT_LIST_HEAD(&zone->free_area[order].free_list[t]);
 		zone->free_area[order].nr_free = 0;
 	}

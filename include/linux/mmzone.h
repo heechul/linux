@@ -80,8 +80,12 @@ static inline int get_pageblock_migratetype(struct page *page)
 	return get_pageblock_flags_group(page, PB_migrate, PB_migrate_end);
 }
 
+#define MAX_CACHE_COLORS 64
 struct free_area {
 	struct list_head	free_list[MIGRATE_TYPES];
+#ifdef CONFIG_CGROUP_PHDUSA
+	struct list_head        color_list[MIGRATE_TYPES][MAX_CACHE_COLORS];
+#endif
 	unsigned long		nr_free;
 };
 
