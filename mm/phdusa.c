@@ -57,10 +57,8 @@ static int update_colormask(struct phdusa *ph, const char *buf)
 
 	if (!*buf)
 		bitmap_clear(&ph->colormap, 0, MAX_CACHE_COLORS);
-	else {
-		retval = bitmap_parse(buf, MAX_LINE_LEN, 
-				      &ph->colormap, MAX_CACHE_COLORS);
-	}
+	else
+		retval = bitmap_parselist(buf, &ph->colormap, MAX_CACHE_COLORS);
 
 	return retval;
 }
