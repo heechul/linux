@@ -140,7 +140,7 @@ static int __init color_page_alloc_debugfs(void)
         struct dentry *dir;
         dir = debugfs_create_dir("color_page_alloc", NULL);
 
-	color_page_alloc.colors = 64; /* = LLC_SIZE / WAYS / 4K, TODO*/
+	color_page_alloc.colors = MAX_CACHE_COLORS; /* = LLC_SIZE / WAYS / 4K, TODO*/
 
 	/* statistics initialization */
 	color_page_alloc.stat.min_ns = 0xffffffff;
@@ -971,29 +971,59 @@ static int prep_new_page(struct page *page, int order, gfp_t gfp_flags)
  * page of the buddy set has been taken (not necessarely the first one)
  * Note that expand_index has the same behavior of expand when index = 0
  */
+
 static inline void expand_index(struct zone *zone, struct page * start_page,
 				int low, int high, struct free_area * area,
-				int migratetype, int index)
+				int migratetype, int index, 
+				int use_color, int max_colors)
 {
 	/* For now, lets assume that low = 0 i.e. we allocate one page at a time*/
 	unsigned int size = 1 << high;
+	unsigned long pfn;
+	struct free_area *color_area;
+	int color;
 
 	while(high > low){
 		high--;
 		area--;
 		size >>= 1;
-		if( index >= size ){
-			//Expand left side of the buddy
-			list_add(&start_page[0].lru, &area->free_list[migratetype]);
-			area->nr_free++;
+		if(index >= size) {
+			/* Expand left side of the buddy */
+			if (high == 0 && use_color) {
+				pfn = page_to_pfn(start_page);
+				color = pfn % max_colors;
+				color_area = &(zone->color_area[color]);
+				list_add(&start_page[0].lru, 
+					 &color_area->free_list[migratetype]);
+				color_area->nr_free++;
+				memdbg(4, "-- add 0x%08lx to color %d total %ld\n",
+				       pfn, color, color_area->nr_free);
+			} else {
+				list_add(&start_page[0].lru, 
+					 &area->free_list[migratetype]);
+				area->nr_free++;
+			}
 			set_page_order(&start_page[0], high);
-			//In this case, we have to move the start to the second half
+
+			/* In this case, move the start to the second half */
 			start_page = &start_page[size];
 			index -= size;
 		} else {
-			//Expand the right side of the buddy
-			list_add(&start_page[size].lru, &area->free_list[migratetype]);
-			area->nr_free++;
+			/* Expand the right side of the buddy */
+			if (high == 0 && use_color) {
+				pfn = page_to_pfn(&start_page[size]);
+				color = pfn % max_colors;
+				color_area = &(zone->color_area[color]);
+				list_add(&start_page[size].lru, 
+					 &color_area->free_list[migratetype]);
+				color_area->nr_free++;
+				memdbg(4, "-- add 0x%08lx to color %d total %ld\n",
+				       pfn, color, color_area->nr_free);
+			} else {
+				list_add(&start_page[size].lru, 
+					 &area->free_list[migratetype]);
+				area->nr_free++;
+			}
 			set_page_order(&start_page[size], high);
 		}
 	}
@@ -1008,7 +1038,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						int migratetype)
 {
         unsigned int current_order;
-        struct free_area * area;
+        struct free_area *area, *color_area;
         struct page *page = NULL;
         unsigned long pfn = 0;
         struct list_head *curr, *tmp;
@@ -1020,6 +1050,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		color_page_alloc.colors: MAX_CACHE_COLORS;
 	int use_color = 0;
 	int color;
+	int index = 0;
+
+	/* TODO: how to re-use the color_area->free_list */
 
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
@@ -1036,6 +1069,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				continue;
 			page = list_entry(area->free_list[migratetype].next,
 					  struct page, lru);
+			area->nr_free--;
 			goto found_page;
 		}
 
@@ -1044,18 +1078,20 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		/* colored page search */
 		if (current_order == 0) {
 			/* order-0 allication. e.g., page fault handling. */
-			
 			/* First, check if I have colored pages */
 			color = find_first_bit(&ph->colormap, max_colors);
 			while (color < max_colors) {
-				if (!list_empty(&area->color_list[migratetype][color])) {
+				color_area = &(zone->color_area[color]);
+				if (!list_empty(&color_area->free_list[migratetype])){
 					page = list_entry(
-						area->color_list[migratetype][color].next,
+						color_area->free_list[migratetype].next,
 						struct page, lru);
 					memdbg(3, "- found in color %d list\n", color);
+					color_area->nr_free--;
 					goto found_page_color;
 				}
-				color = find_next_bit(&ph->colormap, max_colors, color + 1);
+				color = find_next_bit(&ph->colormap, 
+						      max_colors, color + 1);
 			}
 			
 			/* No luck. now let's iterate normal list */
@@ -1066,10 +1102,17 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				if (test_bit(color, &ph->colormap)) {
 					/* found a matching page  */
 					memdbg(3, "- found in normal list\n");
+					area->nr_free--;
 					goto found_page_color;
 				} else {
 					/* move curr to color list */
-					list_move(curr, &area->color_list[migratetype][color]);
+					color_area = &(zone->color_area[color]);
+					list_move(curr,
+						  &color_area->free_list[migratetype]);
+					color_area->nr_free++;
+					memdbg(4, "-- add 0x%08lx to color %d total %ld\n",
+					       pfn, color, color_area->nr_free);
+					area->nr_free--;
 				}
 				iters ++;
 			}
@@ -1079,14 +1122,18 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			/* high order allocation. */
 			list_for_each(curr, &area->free_list[migratetype]) {
 				page  = list_entry(curr, struct page, lru);
-				pfn   = page_to_pfn(page);
-				color = pfn % max_colors;
-				/* TODO: bits: [color, color+2^current_order-1] */
-				if (test_bit(color, &ph->colormap)) {
-					/* found a matching page */
-					memdbg(3, "- found in order %d list\n",
-					       current_order);
-					goto found_page_color;
+				for (index = 0; index < (1<<current_order); index++) {
+					pfn   = page_to_pfn(&page[index]);
+					color = pfn % max_colors;
+					memdbg(4, "-- idx %d/%d pfn 0x%lx color %d\n",
+					       index, 1<<current_order, pfn, color);
+					if (test_bit(color, &ph->colormap)) {
+						/* found a matching page */
+						memdbg(3, "- found in order %d list\n",
+						       current_order);
+						area->nr_free--;
+						goto found_page_color;
+					}
 				}
 				iters++;
 			}
@@ -1095,8 +1142,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		}
 	found_page_color:
 		duration = ktime_sub(ktime_get(), start);
-		memdbg(2, "order %d/%d pfn 0x%08lx color %d iters %d in %lld ns\n",
-		       order, current_order, pfn, (int)(pfn % max_colors),
+		memdbg(2, "order %d/%d pfn 0x%08lx idx %d color %d iters %d in %lld ns\n",
+		       order, current_order, page_to_pfn(&page[index]), index, color,
 		       iters, duration.tv64);
 
 		/* update statistics */
@@ -1108,9 +1155,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	found_page:
 		list_del(&page->lru);
 		rmv_page_order(page);
-		area->nr_free--;
-		expand(zone, page, order, current_order, area, migratetype);
-		return page;
+		expand_index(zone, page, order, current_order, 
+			     area, migratetype, index, use_color, max_colors);
+		return &page[index];
 	}
 	return NULL;
 }
@@ -1694,9 +1741,7 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 	int cold = !!(gfp_flags & __GFP_COLD);
 
 again:
-	if (likely(order == 0) && 
-	    !(color_page_alloc.enabled && 
-	      cpumask_weight(&current->cpus_allowed) != num_online_cpus())) {
+	if (likely(order == 0)) {
 		struct per_cpu_pages *pcp;
 		struct list_head *list;
 
@@ -4057,12 +4102,13 @@ void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 static void __meminit zone_init_free_lists(struct zone *zone)
 {
 	int order, t;
-	for_each_migratetype_order(order, t) {
 #ifdef CONFIG_CGROUP_PHDUSA
-		int c;
-		for (c = 0; c < MAX_CACHE_COLORS; c++)
-			INIT_LIST_HEAD(&zone->free_area[order].color_list[t][c]);
+	int c;
+	for (c = 0; c < MAX_CACHE_COLORS; c++)
+		for (t = 0; t < MIGRATE_TYPES; t++)
+			INIT_LIST_HEAD(&zone->color_area[c].free_list[t]);
 #endif
+	for_each_migratetype_order(order, t) {
 		INIT_LIST_HEAD(&zone->free_area[order].free_list[t]);
 		zone->free_area[order].nr_free = 0;
 	}

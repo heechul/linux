@@ -69,6 +69,10 @@ enum {
 #  define cma_wmark_pages(zone) 0
 #endif
 
+#ifdef CONFIG_CGROUP_PHDUSA
+#  define MAX_CACHE_COLORS 8
+#endif
+
 #define for_each_migratetype_order(order, type) \
 	for (order = 0; order < MAX_ORDER; order++) \
 		for (type = 0; type < MIGRATE_TYPES; type++)
@@ -80,12 +84,8 @@ static inline int get_pageblock_migratetype(struct page *page)
 	return get_pageblock_flags_group(page, PB_migrate, PB_migrate_end);
 }
 
-#define MAX_CACHE_COLORS 64
 struct free_area {
 	struct list_head	free_list[MIGRATE_TYPES];
-#ifdef CONFIG_CGROUP_PHDUSA
-	struct list_head        color_list[MIGRATE_TYPES][MAX_CACHE_COLORS];
-#endif
 	unsigned long		nr_free;
 };
 
@@ -388,6 +388,10 @@ struct zone {
 	unsigned long		min_cma_pages;
 #endif
 	struct free_area	free_area[MAX_ORDER];
+
+#ifdef CONFIG_CGROUP_PHDUSA
+	struct free_area        color_area[MAX_CACHE_COLORS];
+#endif
 
 #ifndef CONFIG_SPARSEMEM
 	/*
