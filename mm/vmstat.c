@@ -801,12 +801,18 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 						struct zone *zone)
 {
 	int order;
-
+#ifdef CONFIG_CGROUP_PHDUSA
+	int color, npages = 0;
+	for (color = 0; color < MAX_CACHE_COLORS; color++)
+		npages += zone->color_area[color].nr_free;
+	seq_printf(m, "Color %d |", npages);
+#endif
 	seq_printf(m, "Node %d, zone %8s ", pgdat->node_id, zone->name);
 	for (order = 0; order < MAX_ORDER; ++order)
 		seq_printf(m, "%6lu ", zone->free_area[order].nr_free);
 	seq_putc(m, '\n');
 }
+
 
 /*
  * This walks the free areas for each zone.

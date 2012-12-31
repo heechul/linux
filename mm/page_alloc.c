@@ -982,7 +982,7 @@ static inline void expand_index(struct zone *zone, struct page * start_page,
 	unsigned long pfn;
 	struct free_area *color_area;
 	int color;
-
+	
 	while(high > low){
 		high--;
 		area--;
@@ -1029,6 +1029,25 @@ static inline void expand_index(struct zone *zone, struct page * start_page,
 	}
 }
 
+/* debug */
+static inline unsigned long list_count(struct list_head *head)
+{
+	unsigned long n = 0;
+	struct list_head *curr;
+	list_for_each(curr, head)
+		n++;
+	return n;
+}
+
+static void update_stat(ktime_t duration, struct color_stat *stat)
+{
+	/* update statistics */
+	stat->min_ns = min(duration.tv64, stat->min_ns);
+	stat->max_ns = max(duration.tv64, stat->max_ns);
+	stat->tot_ns += duration.tv64;
+	stat->tot_cnt++;
+}
+
 /*
  * Go through the free lists for the given migratetype and remove
  * the smallest available page from the freelists
@@ -1042,17 +1061,15 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
         struct page *page = NULL;
         unsigned long pfn = 0;
         struct list_head *curr, *tmp;
-	int iters = 0;
 	ktime_t start, duration;
 	struct phdusa *ph;
 	struct color_stat *stat = &color_page_alloc.stat;
-	int max_colors = (color_page_alloc.colors) ?
-		color_page_alloc.colors: MAX_CACHE_COLORS;
-	int use_color = 0;
-	int color;
-	int index = 0;
+	int iters, color, index, use_color, max_colors;
 
-	/* TODO: how to re-use the color_area->free_list */
+	start.tv64 = 0;
+	iters = index = use_color = 0;
+	max_colors = (color_page_alloc.colors) ?
+		color_page_alloc.colors: MAX_CACHE_COLORS;
 
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
@@ -1069,7 +1086,6 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				continue;
 			page = list_entry(area->free_list[migratetype].next,
 					  struct page, lru);
-			area->nr_free--;
 			goto found_page;
 		}
 
@@ -1087,8 +1103,15 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						color_area->free_list[migratetype].next,
 						struct page, lru);
 					memdbg(3, "- found in color %d list\n", color);
+
+					duration = ktime_sub(ktime_get(), start);
+					update_stat(duration, stat);
+
+					list_del(&page->lru);
+					rmv_page_order(page);
+					BUG_ON(color_area->nr_free == 0);
 					color_area->nr_free--;
-					goto found_page_color;
+					return page;
 				}
 				color = find_next_bit(&ph->colormap, 
 						      max_colors, color + 1);
@@ -1102,7 +1125,6 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				if (test_bit(color, &ph->colormap)) {
 					/* found a matching page  */
 					memdbg(3, "- found in normal list\n");
-					area->nr_free--;
 					goto found_page_color;
 				} else {
 					/* move curr to color list */
@@ -1112,9 +1134,10 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 					color_area->nr_free++;
 					memdbg(4, "-- add 0x%08lx to color %d total %ld\n",
 					       pfn, color, color_area->nr_free);
+					BUG_ON(area->nr_free == 0);
 					area->nr_free--;
 				}
-				iters ++;
+				iters++;
 			}
 			/* Not in the current order. move on to the next order */
 			continue;
@@ -1131,7 +1154,6 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						/* found a matching page */
 						memdbg(3, "- found in order %d list\n",
 						       current_order);
-						area->nr_free--;
 						goto found_page_color;
 					}
 				}
@@ -1142,19 +1164,16 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		}
 	found_page_color:
 		duration = ktime_sub(ktime_get(), start);
+		update_stat(duration, stat);
+
 		memdbg(2, "order %d/%d pfn 0x%08lx idx %d color %d iters %d in %lld ns\n",
 		       order, current_order, page_to_pfn(&page[index]), index, color,
 		       iters, duration.tv64);
-
-		/* update statistics */
-		stat->min_ns = min(duration.tv64, stat->min_ns);
-		stat->max_ns = max(duration.tv64, stat->max_ns);
-		stat->tot_ns += duration.tv64;
-		stat->tot_cnt++;
-		
 	found_page:
 		list_del(&page->lru);
 		rmv_page_order(page);
+		BUG_ON(area->nr_free == 0);
+		area->nr_free--;
 		expand_index(zone, page, order, current_order, 
 			     area, migratetype, index, use_color, max_colors);
 		return &page[index];
@@ -1186,7 +1205,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		expand(zone, page, order, current_order, area, migratetype);
 		return page;
 	}
-
+	
 	return NULL;
 }
 #endif /* CONFIG_CGROUP_PHDUSA */
