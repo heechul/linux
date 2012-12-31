@@ -805,7 +805,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 	int color, npages = 0;
 	for (color = 0; color < MAX_CACHE_COLORS; color++)
 		npages += zone->color_area[color].nr_free;
-	seq_printf(m, "Color %d |", npages);
+	seq_printf(m, "Color %6d |", npages);
 #endif
 	seq_printf(m, "Node %d, zone %8s ", pgdat->node_id, zone->name);
 	for (order = 0; order < MAX_ORDER; ++order)
