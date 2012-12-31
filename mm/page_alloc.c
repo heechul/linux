@@ -95,11 +95,13 @@ static struct {
 
 static inline void update_colormap(struct page *page, int size, struct free_area *area)
 {
-	int i, pfn, color, max_colors;
-	max_colors = color_page_alloc.colors;
+	int i, pfn, color;
+
+	BUG_ON(!page || !area);
+
 	for (i = 0; i < size; i++) {
 		pfn = page_to_pfn(&page[i]);
-		color = pfn % max_colors;
+		color = pfn % MAX_CACHE_COLORS;
 		set_bit(color, &area->colormap);
 	}
 }
@@ -945,6 +947,9 @@ static inline void expand(struct zone *zone, struct page *page,
 #endif
 		list_add(&page[size].lru, &area->free_list[migratetype]);
 		area->nr_free++;
+#ifdef CONFIG_CGROUP_PHDUSA
+		update_colormap(&page[size], size, area);
+#endif
 		set_page_order(&page[size], high);
 	}
 }
@@ -1109,6 +1114,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 		if (iters == 0)	start = ktime_get();
 
+		iters++;
+
 		/* colored page search */
 		if (current_order == 0) {
 			/* order-0 allication. e.g., page fault handling. */
@@ -1124,10 +1131,11 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						color_area->free_list[migratetype].next,
 						struct page, lru);
 
+					color_area->nr_free--;
 					memdbg(3, "- found in color %d list(%ld/%ld)\n", 
 					       color, color_area->nr_free,
 					       list_count(&color_area->free_list[migratetype]));
-					color_area->nr_free--;
+
 					stat->cache_hit_cnt++;
 					goto found_page_color;
 				}
@@ -1149,7 +1157,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				color = pfn % max_colors;
 				if (test_bit(color, &ph->colormap)) {
 					/* found a matching page  */
-					memdbg(3, "- found in normal list\n");
+					memdbg(3, "- found in normal list order-0\n");
 					goto found_page_color;
 				} else {
 					/* move curr to color list */
@@ -1169,7 +1177,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			   any colors in ph->colormap */
 			bitmap_andnot(&area->colormap,
 				      &area->colormap, &ph->colormap, max_colors);
-			memdbg(4, "-- order %d colormap: 0x%08lx\n",
+			memdbg(5, "-- set order %d colormap: 0x%08lx\n",
 			       current_order, area->colormap);
 			/* Not in the current order. move on to the next order */
 			continue;
@@ -1203,7 +1211,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			bitmap_andnot(&area->colormap,
 				      &area->colormap, &ph->colormap, max_colors);
 
-			memdbg(4, "-- order %d colormap: 0x%08lx\n",
+			memdbg(5, "-- set order %d colormap: 0x%08lx\n",
 			       current_order, area->colormap);
 			/* Not in the current order. move on to the next order */
 			continue;
@@ -1229,6 +1237,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			     area, migratetype, index, use_color, max_colors);
 		return &page[index];
 	}
+	printk(KERN_ERR "ERROR: Can't find a free page: %s\n", current->comm);
 	return NULL;
 }
 
