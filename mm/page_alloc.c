@@ -170,6 +170,10 @@ static int __init color_page_alloc_debugfs(void)
 	color_page_alloc.stat.min_ns = 0xffffffff;
 	color_page_alloc.stat.max_ns = 0;
 
+	/* default setting */
+	color_page_alloc.enabled = 2; /* use color bitmap optimization */
+	color_page_alloc.colors = MAX_CACHE_COLORS;
+
         if (!dir)
                 return PTR_ERR(dir);
         if (!debugfs_create_u32("enable", mode, dir, &color_page_alloc.enabled))
@@ -1015,18 +1019,12 @@ static inline unsigned long list_count(struct list_head *head)
  */
 static inline void expand_index(struct zone *zone, struct page * start_page,
 				int low, int high, struct free_area * area,
-				int migratetype, int index, 
-				int use_color, int max_colors)
+				int migratetype, int index)
 {
 	/* For now, lets assume that low = 0 i.e. we allocate one page at a time*/
 	unsigned int size = 1 << high;
-	unsigned long pfn;
-	struct free_area *color_area;
 	struct page *buddy_page;
-	struct color_stat *stat = &color_page_alloc.stat;
 
-	int color;
-	
 	while(high > low){
 		high--;
 		area--;
@@ -1045,25 +1043,7 @@ static inline void expand_index(struct zone *zone, struct page * start_page,
 			buddy_page = &start_page[size];
 		}
 
-		/* insert the buddy to either color_list or regular free_list */
-		if (high == 0 && use_color) {
-			pfn = page_to_pfn(buddy_page);
-			color = pfn % max_colors;
-			color_area = &(zone->color_area[color]);
-
-			list_add(&buddy_page->lru, 
-				 &color_area->free_list[migratetype]);
-			color_area->nr_free++;
-			stat->cache_add_cnt++;
-
-			memdbg(4, "-- expand: 0x%08lx to color %d list(%ld/%ld)\n",
-			       pfn, color, color_area->nr_free, 
-			       list_count(&color_area->free_list[migratetype]));
-
-		} else {
-			list_add(&buddy_page->lru, 
-				 &area->free_list[migratetype]);
-		}
+		list_add(&buddy_page->lru, &area->free_list[migratetype]);
 		update_colormap(buddy_page, size, area);
 		area->nr_free++;
 		set_page_order(buddy_page, high);
@@ -1079,15 +1059,15 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						int migratetype)
 {
         unsigned int current_order;
-        struct free_area *area, *color_area;
+        struct free_area *area;
         struct page *page = NULL;
         unsigned long pfn = 0;
-        struct list_head *curr, *tmp;
+        struct list_head *curr;
 	ktime_t start, duration;
 	struct phdusa *ph;
 	struct color_stat *stat = &color_page_alloc.stat;
-	int iters, color, index, use_color, max_colors, use_cmap_opt;
-
+	int i, iters, color, index, use_color, max_colors, use_cmap_opt;
+	
 	start.tv64 = 0;
 	iters = index = use_color = use_cmap_opt = 0;
 	max_colors = (color_page_alloc.colors) ?
@@ -1099,146 +1079,87 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	if (ph && bitmap_weight(&ph->colormap, max_colors) > 0)
 		use_color = 1;
 
+retry:
 	/* Find a page of the appropriate size in the preferred list */
         for (current_order = order; current_order < MAX_ORDER; ++current_order) {
 		area = &(zone->free_area[current_order]);
 
+		if (list_empty(&area->free_list[migratetype]))
+			continue;
+
 		/* normal allocation */
 		if (!use_color || order > 0) {
-			if (list_empty(&area->free_list[migratetype]))
-				continue;
 			page = list_entry(area->free_list[migratetype].next,
 					  struct page, lru);
 			goto found_page;
 		}
 
-		if (iters == 0)	start = ktime_get();
-
+		/* colored allocation */
+		if (iters == 0)	
+			start = ktime_get();
 		iters++;
 
-		/* colored page search */
-		if (current_order == 0) {
-			/* order-0 allication. e.g., page fault handling. */
-			/* First, check if I have colored pages */
-			color = find_first_bit(&ph->colormap, max_colors);
-			while (color < max_colors) {
-				color_area = &(zone->color_area[color]);
-				memdbg(4, "- looking for color %d list(%ld/%ld)\n", 
-				       color, color_area->nr_free,
-				       list_count(&color_area->free_list[migratetype]));
-				if (!list_empty(&color_area->free_list[migratetype])){
-					page = list_entry(
-						color_area->free_list[migratetype].next,
-						struct page, lru);
-
-					color_area->nr_free--;
-					memdbg(3, "- found in color %d list(%ld/%ld)\n", 
-					       color, color_area->nr_free,
-					       list_count(&color_area->free_list[migratetype]));
-
-					stat->cache_hit_cnt++;
-					goto found_page_color;
-				}
-				color = find_next_bit(&ph->colormap, 
-						      max_colors, color + 1);
-			}
-
-			/* if there's no shared colors in the list, no need to search */
-			if (use_cmap_opt && !bitmap_intersects(&area->colormap,
-					       &ph->colormap, max_colors)) {
-				memdbg(4, "-- order %d colormap: 0x%08lx\n",
-				       current_order, area->colormap);
-				continue;
-			}
-			/* No luck. now let's iterate normal list */
-			list_for_each_safe(curr, tmp, &area->free_list[migratetype]) {
-				page  = list_entry(curr, struct page, lru);
-				pfn   = page_to_pfn(page);
-				color = pfn % max_colors;
-				if (test_bit(color, &ph->colormap)) {
-					/* found a matching page  */
-					memdbg(3, "- found in normal list order-0\n");
-					goto found_page_color;
-				} else {
-					/* move curr to color list */
-					color_area = &(zone->color_area[color]);
-					list_move_tail(curr,
-						  &color_area->free_list[migratetype]);
-					color_area->nr_free++;
-					stat->cache_add_cnt++;
-					memdbg(4, "-- add 0x%8lx to color %d list(%ld/%ld)\n",
-					       pfn, color, color_area->nr_free,
-					       list_count(&color_area->
-							  free_list[migratetype]));
-				}
-				iters++;
-			}
-			/* at this point, we know that this order do not contain
-			   any colors in ph->colormap */
-			bitmap_andnot(&area->colormap,
-				      &area->colormap, &ph->colormap, max_colors);
-			memdbg(5, "-- set order %d colormap: 0x%08lx\n",
+		/* if there's no shared colors in the list, no need to search */
+		if (use_cmap_opt && 
+		    !bitmap_intersects(&area->colormap, &ph->colormap, max_colors)) 
+		{
+			memdbg(4, "-- order %d colormap: 0x%08lx\n",
 			       current_order, area->colormap);
-			/* Not in the current order. move on to the next order */
-			continue;
-		} else {
-			/* if there's no shared colors in the list, no need to search */
-			if (use_cmap_opt && !bitmap_intersects(&area->colormap,
-					       &ph->colormap, max_colors)) {
-				memdbg(4, "-- order %d colormap: 0x%08lx\n",
-				       current_order, area->colormap);
-				continue;
-			}
-			/* high order allocation. */
-			list_for_each(curr, &area->free_list[migratetype]) {
-				page  = list_entry(curr, struct page, lru);
-				for (index = 0; index < (1<<current_order); index++) {
-					pfn   = page_to_pfn(&page[index]);
-					color = pfn % max_colors;
-					memdbg(5, "-- idx %d/%d pfn 0x%lx color %d\n",
-					       index, 1<<current_order, pfn, color);
-					if (test_bit(color, &ph->colormap)) {
-						/* found a matching page */
-						memdbg(3, "- found in order %d list\n",
-						       current_order);
-						goto found_page_color;
-					}
-				}
-				iters++;
-			}
-			/* at this point, we know that this order do not contain
-			   any colors in ph->colormap */
-			bitmap_andnot(&area->colormap,
-				      &area->colormap, &ph->colormap, max_colors);
-
-			memdbg(5, "-- set order %d colormap: 0x%08lx\n",
-			       current_order, area->colormap);
-			/* Not in the current order. move on to the next order */
 			continue;
 		}
-	found_page_color:
-		duration = ktime_sub(ktime_get(), start);
-		/* update statistics */
-		stat->min_ns = min(duration.tv64, stat->min_ns);
-		stat->max_ns = max(duration.tv64, stat->max_ns);
-		stat->tot_ns += duration.tv64;
-		stat->tot_cnt++;
-		stat->iter_cnt += iters;
-		
-		memdbg(2, "order %d/%d pfn 0x%08lx idx %d color %d iters %d in %lld ns\n",
-		       order, current_order, page_to_pfn(&page[index]), index, color,
-		       iters, duration.tv64);
-	found_page:
-		list_del(&page->lru);
-		rmv_page_order(page);
-		BUG_ON(area->nr_free == 0);
-		area->nr_free--;
-		expand_index(zone, page, order, current_order, 
-			     area, migratetype, index, use_color, max_colors);
-		return &page[index];
+		/* high order allocation. */
+		list_for_each(curr, &area->free_list[migratetype]) {
+			page  = list_entry(curr, struct page, lru);
+			for (i = 0; i < (1<<current_order); i++) {
+				pfn   = page_to_pfn(&page[i]);
+				color = pfn % max_colors;
+				memdbg(5, "-- idx %d/%d pfn 0x%lx color %d\n",
+				       i, 1<<current_order, pfn, color);
+				if (test_bit(color, &ph->colormap)) {
+					index = i;
+					/* found a matching page */
+					memdbg(3, "- found in order %d list\n",
+					       current_order);
+					goto found_page_color;
+				}
+			}
+			iters++;
+		}
+		/* at this point, we know that this order do not contain
+		   any colors in ph->colormap */
+		bitmap_andnot(&area->colormap,
+			      &area->colormap, &ph->colormap, max_colors);
 	}
+
+	if (use_cmap_opt || use_color ) {
+		use_cmap_opt = use_color = 0;
+		memdbg(1, "Not enough memory. turn off the coloring\n");
+		goto retry;
+	}
+
 	printk(KERN_ERR "ERROR: Can't find a free page: %s\n", current->comm);
 	return NULL;
+
+found_page_color:
+	duration = ktime_sub(ktime_get(), start);
+	/* update statistics */
+	stat->min_ns = min(duration.tv64, stat->min_ns);
+	stat->max_ns = max(duration.tv64, stat->max_ns);
+	stat->tot_ns += duration.tv64;
+	stat->tot_cnt++;
+	stat->iter_cnt += iters;
+	
+	memdbg(2, "order %d/%d pfn 0x%08lx idx %d color %d iters %d in %lld ns\n",
+	       order, current_order, page_to_pfn(&page[index]), index, color,
+	       iters, duration.tv64);
+found_page:
+	list_del(&page->lru);
+	rmv_page_order(page);
+	BUG_ON(area->nr_free == 0);
+	area->nr_free--;
+	expand_index(zone, page, order, current_order, 
+		     area, migratetype, index);
+	return &page[index];
 }
 
 #else /* !CONFIG_CGROUP_PHDUSA */
