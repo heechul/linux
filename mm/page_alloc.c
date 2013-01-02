@@ -1099,6 +1099,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	if (ph && bitmap_weight(&ph->colormap, max_colors) > 0)
 		use_color = 1;
 
+retry:
 	/* Find a page of the appropriate size in the preferred list */
         for (current_order = order; current_order < MAX_ORDER; ++current_order) {
 		area = &(zone->free_area[current_order]);
@@ -1230,12 +1231,17 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		       iters, duration.tv64);
 	found_page:
 		list_del(&page->lru);
-		rmv_page_order(page);
+		rmv_page_order(&page[index]);
 		BUG_ON(area->nr_free == 0);
 		area->nr_free--;
 		expand_index(zone, page, order, current_order, 
 			     area, migratetype, index, use_color, max_colors);
 		return &page[index];
+	}
+
+	if (use_color || use_cmap_opt) {
+		use_cmap_opt = use_color = 0;
+		goto retry;
 	}
 	printk(KERN_ERR "ERROR: Can't find a free page: %s\n", current->comm);
 	return NULL;
