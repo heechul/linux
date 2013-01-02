@@ -1103,8 +1103,8 @@ retry:
 		if (use_cmap_opt && 
 		    !bitmap_intersects(&area->colormap, &ph->colormap, max_colors)) 
 		{
-			memdbg(4, "-- order %d colormap: 0x%08lx\n",
-			       current_order, area->colormap);
+			memdbg(4, "-- order %d colormap: 0x%08lx vs. phmap: 0x%08lx\n",
+			       current_order, area->colormap, ph->colormap);
 			continue;
 		}
 		/* high order allocation. */
@@ -1137,7 +1137,9 @@ retry:
 		goto retry;
 	}
 
-	printk(KERN_ERR "ERROR: Can't find a free page: %s\n", current->comm);
+	printk(KERN_ERR "ERROR: Can't find %dk page for %s in zone %s\n", 
+	       4*(1<<order), current->comm, zone->name);
+
 	return NULL;
 
 found_page_color:
@@ -1154,7 +1156,7 @@ found_page_color:
 	       iters, duration.tv64);
 found_page:
 	list_del(&page->lru);
-	rmv_page_order(page);
+	rmv_page_order(&page[index]);
 	BUG_ON(area->nr_free == 0);
 	area->nr_free--;
 	expand_index(zone, page, order, current_order, 
