@@ -1113,8 +1113,8 @@ retry:
 			for (i = 0; i < (1<<current_order); i++) {
 				pfn   = page_to_pfn(&page[i]);
 				color = pfn % max_colors;
-				memdbg(5, "-- idx %d/%d pfn 0x%lx color %d\n",
-				       i, 1<<current_order, pfn, color);
+				memdbg(5, "-- order %d idx %d/%d pfn 0x%lx color %d\n",
+				       current_order, i, 1<<current_order, pfn, color);
 				if (test_bit(color, &ph->colormap)) {
 					index = i;
 					/* found a matching page */
