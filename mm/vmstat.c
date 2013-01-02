@@ -803,27 +803,28 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 	int order;
 #ifdef CONFIG_CGROUP_PHDUSA
 	int color, mt;
+	seq_printf(m, "\n");
 	for (color = 0; color < MAX_CACHE_COLORS; color++) {
 		seq_printf(m, "Color %15d ", color);
 		for (order = 0; order < MAX_ORDER; order++) {
 			int cnt = 0;
 			struct free_area *area;
+			struct list_head *curr;
+
 			area = &(zone->free_area[order]);
-			for (mt = 0; mt < MIGRATE_ISOLATE; mt++) {
-				struct list_head *curr;
-				list_for_each(curr, &area->free_list[mt]) {
-					struct page *page;
-					int i;
-					/* high order page can match multiple colors */
-					page = list_entry(curr, struct page, lru);
-					for (i = 0; i < (1<<order); i++) {
-						int c, pfn;
-						pfn = page_to_pfn(&page[i]);
-						c = pfn % MAX_CACHE_COLORS;
-						if (c == color) {
-							cnt++;
-							break;
-						}
+			mt = MIGRATE_MOVABLE;
+			list_for_each(curr, &area->free_list[mt]) {
+				struct page *page;
+				int i;
+				/* high order page can match multiple colors */
+				page = list_entry(curr, struct page, lru);
+				for (i = 0; i < (1<<order); i++) {
+					int c, pfn;
+					pfn = page_to_pfn(&page[i]);
+					c = pfn % MAX_CACHE_COLORS;
+					if (c == color) {
+						cnt++;
+						break;
 					}
 				}
 			}

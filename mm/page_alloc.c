@@ -93,19 +93,6 @@ static struct {
 } color_page_alloc;
 
 
-static inline void update_colormap(struct page *page, int size, struct free_area *area)
-{
-	int i, pfn, color;
-
-	BUG_ON(!page || !area);
-
-	for (i = 0; i < size; i++) {
-		pfn = page_to_pfn(&page[i]);
-		color = pfn % MAX_CACHE_COLORS;
-		set_bit(color, &area->colormap);
-	}
-}
-
 static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf,
 				      size_t cnt, loff_t *ppos)
 {
@@ -725,9 +712,6 @@ static inline void __free_one_page(struct page *page,
 
 	list_add(&page->lru, &zone->free_area[order].free_list[migratetype]);
 out:
-#ifdef CONFIG_CGROUP_PHDUSA
-	update_colormap(page, (1 << order), &zone->free_area[order]);
-#endif
 	zone->free_area[order].nr_free++;
 }
 
@@ -951,9 +935,6 @@ static inline void expand(struct zone *zone, struct page *page,
 #endif
 		list_add(&page[size].lru, &area->free_list[migratetype]);
 		area->nr_free++;
-#ifdef CONFIG_CGROUP_PHDUSA
-		update_colormap(&page[size], size, area);
-#endif
 		set_page_order(&page[size], high);
 	}
 }
@@ -1011,159 +992,140 @@ static inline unsigned long list_count(struct list_head *head)
 	return n;
 }
 
-
-/*
- * This function perform the buddy system structure expansion given that an arbitrary
- * page of the buddy set has been taken (not necessarely the first one)
- * Note that expand_index has the same behavior of expand when index = 0
- */
-static inline void expand_index(struct zone *zone, struct page * start_page,
-				int low, int high, struct free_area * area,
-				int migratetype, int index)
+void ccache_insert(struct zone *zone, struct page *page, int order)
 {
-	/* For now, lets assume that low = 0 i.e. we allocate one page at a time*/
-	unsigned int size = 1 << high;
-	struct page *buddy_page;
-
-	while(high > low){
-		high--;
-		area--;
-		size >>= 1;
-
-		/* choose right buddy page depending on index value */
-		if(index >= size) {
-			/* Expand left side of the buddy */
-			buddy_page = start_page;
-
-			/* In this case, move the start to the second half */
-			start_page = &start_page[size];
-			index -= size;
-		} else {
-			/* Expand the right side of the buddy */
-			buddy_page = &start_page[size];
-		}
-
-		list_add(&buddy_page->lru, &area->free_list[migratetype]);
-		update_colormap(buddy_page, size, area);
-		area->nr_free++;
-		set_page_order(buddy_page, high);
+	int i, color;
+	/* 1 page (2^order) -> 2^order x pages of colored cache. */
+	list_del(&page->lru);
+	for (i = 0; i < (1<<order); i++) {
+		color = page_to_pfn(&page[i]) % MAX_CACHE_COLORS;
+		list_add(&page[i].lru, &zone->color_list[color]);
+		set_bit(color, &zone->color_bitmap);
+		zone->free_area[0].nr_free++;
+		set_page_order(&page[i], 0);
 	}
+	memdbg(4, "add pfn %ld (order=%d,zone=%s)\n", 
+	       page_to_pfn(page), order, zone->name);
+	zone->free_area[order].nr_free--;
+}
+
+struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap)
+{
+	struct page *page;
+	unsigned long tmpmask;
+	int c;
+
+	/* find color cache entry */
+	if (!bitmap_intersects(&zone->color_bitmap, &cmap, MAX_CACHE_COLORS))
+		return NULL;
+
+	bitmap_and(&tmpmask, &zone->color_bitmap, &cmap, MAX_CACHE_COLORS);
+	c = find_first_bit(&tmpmask, MAX_CACHE_COLORS);
+	page = list_entry(zone->color_list[c].next, struct page, lru);
+	memdbg(4, "found pfn %ld (color=%d,zone=%s)\n", 
+	       page_to_pfn(page), c, zone->name);
+
+	return page;
 }
 
 /*
  * Go through the free lists for the given migratetype and remove
  * the smallest available page from the freelists
  */
-static inline
+static /* inline */
 struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						int migratetype)
 {
-        unsigned int current_order;
-        struct free_area *area;
-        struct page *page = NULL;
-        unsigned long pfn = 0;
-        struct list_head *curr;
+	unsigned int current_order;
+	struct free_area *area;
+	struct list_head *curr;
+	struct page *page;
+	int use_color = 0;
 	ktime_t start, duration;
 	struct phdusa *ph;
 	struct color_stat *stat = &color_page_alloc.stat;
-	int i, iters, color, index, use_color, max_colors, use_cmap_opt;
-	
-	start.tv64 = 0;
-	iters = index = use_color = use_cmap_opt = 0;
-	max_colors = (color_page_alloc.colors) ?
-		color_page_alloc.colors: MAX_CACHE_COLORS;
-	use_cmap_opt = (color_page_alloc.enabled == 2);
+	int iters;
 
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
-	if (ph && bitmap_weight(&ph->colormap, max_colors) > 0)
+	if (ph && bitmap_weight(&ph->colormap, MAX_CACHE_COLORS) > 0)
 		use_color = 1;
 
-retry:
-	/* Find a page of the appropriate size in the preferred list */
-        for (current_order = order; current_order < MAX_ORDER; ++current_order) {
-		area = &(zone->free_area[current_order]);
+	/* check color cache */
+	if (order == 0 && migratetype == MIGRATE_MOVABLE && use_color) {
+		start = ktime_get();
+		iters = 1; 
+		current_order = 0;
 
-		if (list_empty(&area->free_list[migratetype]))
-			continue;
+		memdbg(2, "check color cache (mt=%d)\n", migratetype);
+		/* find in the cache */
+		page = ccache_find_cmap(zone, ph->colormap);
+		if (page)
+			goto found_page_color;
 
-		/* normal allocation */
-		if (!use_color || order > 0) {
-			page = list_entry(area->free_list[migratetype].next,
-					  struct page, lru);
-			goto found_page;
-		}
-
-		/* colored allocation */
-		if (iters == 0)	
-			start = ktime_get();
-		iters++;
-
-		/* if there's no shared colors in the list, no need to search */
-		if (use_cmap_opt && 
-		    !bitmap_intersects(&area->colormap, &ph->colormap, max_colors)) 
-		{
-			memdbg(4, "-- order %d colormap: 0x%08lx vs. phmap: 0x%08lx\n",
-			       current_order, area->colormap, ph->colormap);
-			continue;
-		}
-		/* high order allocation. */
-		list_for_each(curr, &area->free_list[migratetype]) {
-			page  = list_entry(curr, struct page, lru);
-			for (i = 0; i < (1<<current_order); i++) {
-				pfn   = page_to_pfn(&page[i]);
-				color = pfn % max_colors;
-				memdbg(5, "-- order %d idx %d/%d pfn 0x%lx color %d\n",
-				       current_order, i, 1<<current_order, pfn, color);
-				if (test_bit(color, &ph->colormap)) {
-					index = i;
-					/* found a matching page */
-					memdbg(3, "- found in order %d list\n",
-					       current_order);
+		memdbg(2, "search lists in all orders\n");
+		/* search the entire list. make color cache in the process  */
+		for (current_order = 0; current_order < MAX_ORDER; ++current_order) {
+			area = &(zone->free_area[current_order]);
+			if (list_empty(&area->free_list[migratetype]))
+				continue;
+			memdbg(3, " search order %d\n", current_order);
+			list_for_each(curr, &area->free_list[migratetype]) {
+				page = list_entry(curr, struct page, lru);
+				ccache_insert(zone, page, current_order);
+				iters++;
+				page = ccache_find_cmap(zone, ph->colormap);
+				if (page)
 					goto found_page_color;
-				}
 			}
-			iters++;
 		}
-		/* at this point, we know that this order do not contain
-		   any colors in ph->colormap */
-		bitmap_andnot(&area->colormap,
-			      &area->colormap, &ph->colormap, max_colors);
-	}
+		/* no memory in this zone */
+		return NULL;
 
-	if (use_cmap_opt || use_color ) {
-		use_cmap_opt = use_color = 0;
-		memdbg(1, "Not enough memory. turn off the coloring\n");
-		goto retry;
-	}
-
-	printk(KERN_ERR "ERROR: Can't find %dk page for %s in zone %s\n", 
-	       4*(1<<order), current->comm, zone->name);
-
-	return NULL;
-
-found_page_color:
-	duration = ktime_sub(ktime_get(), start);
-	/* update statistics */
-	stat->min_ns = min(duration.tv64, stat->min_ns);
-	stat->max_ns = max(duration.tv64, stat->max_ns);
-	stat->tot_ns += duration.tv64;
-	stat->tot_cnt++;
-	stat->iter_cnt += iters;
+	found_page_color:
+		duration = ktime_sub(ktime_get(), start);
+		/* update statistics */
+		stat->min_ns = min(duration.tv64, stat->min_ns);
+		stat->max_ns = max(duration.tv64, stat->max_ns);
+		stat->tot_ns += duration.tv64;
+		stat->tot_cnt++;
+		stat->iter_cnt += iters;
 	
-	memdbg(2, "order %d/%d pfn 0x%08lx idx %d color %d iters %d in %lld ns\n",
-	       order, current_order, page_to_pfn(&page[index]), index, color,
-	       iters, duration.tv64);
-found_page:
-	list_del(&page->lru);
-	rmv_page_order(&page[index]);
-	BUG_ON(area->nr_free == 0);
-	area->nr_free--;
-	expand_index(zone, page, order, current_order, 
-		     area, migratetype, index);
-	return &page[index];
-}
+		memdbg(2, "order %d/%d pfn 0x%08lx color %d iters %d in %lld ns\n",
+		       order, current_order, page_to_pfn(page), 
+		       (int)(page_to_pfn(page) % MAX_CACHE_COLORS),
+		       iters, duration.tv64);
 
+		/* remove from the zone->color_list */
+		list_del(&page->lru);
+		rmv_page_order(page);
+		zone->free_area[0].nr_free--;
+		return page;
+	}
+	
+	/* Find a page of the appropriate size in the preferred list */
+	for (current_order = order; current_order < MAX_ORDER; ++current_order) {
+		area = &(zone->free_area[current_order]);
+		if (list_empty(&area->free_list[migratetype])) {
+			unsigned long tmpmask;
+			bitmap_fill(&tmpmask, MAX_CACHE_COLORS);
+			if (current_order == 0 && migratetype == MIGRATE_MOVABLE) {
+				page = ccache_find_cmap(zone, tmpmask);
+				if (page)
+					return page;
+			}
+			continue;
+		}
+		page = list_entry(area->free_list[migratetype].next,
+							struct page, lru);
+		list_del(&page->lru);
+		rmv_page_order(page);
+		area->nr_free--;
+		expand(zone, page, order, current_order, area, migratetype);
+		return page;
+	}
+	return NULL;
+}
 #else /* !CONFIG_CGROUP_PHDUSA */
 
 static inline
@@ -4106,16 +4068,14 @@ static void __meminit zone_init_free_lists(struct zone *zone)
 	int order, t;
 #ifdef CONFIG_CGROUP_PHDUSA
 	int c;
-	for (c = 0; c < MAX_CACHE_COLORS; c++)
-		for (t = 0; t < MIGRATE_TYPES; t++)
-			INIT_LIST_HEAD(&zone->color_area[c].free_list[t]);
+	for (c = 0; c < MAX_CACHE_COLORS; c++) {
+		INIT_LIST_HEAD(&zone->color_list[c]);
+		bitmap_zero(&zone->color_bitmap, MAX_CACHE_COLORS);
+	}
 #endif
 	for_each_migratetype_order(order, t) {
 		INIT_LIST_HEAD(&zone->free_area[order].free_list[t]);
 		zone->free_area[order].nr_free = 0;
-#ifdef CONFIG_CGROUP_PHDUSA
-		bitmap_fill(&zone->free_area[order].colormap, MAX_CACHE_COLORS);
-#endif
 	}
 }
 
