@@ -993,6 +993,20 @@ static inline unsigned long list_count(struct list_head *head)
 	return n;
 }
 
+/* move all color_list pages into free_area[0].freelist[2] */
+void ccache_flush(struct zone *zone)
+{
+	int c;
+	printk(KERN_CRIT "flush the ccache for zone %s\n", zone->name);
+	for (c = 0; c < MAX_CACHE_COLORS; c++) {
+		list_splice(&zone->color_list[c], 
+			    &zone->free_area[0].free_list[MIGRATE_MOVABLE]);
+		clear_bit(c, &zone->color_bitmap);
+		INIT_LIST_HEAD(&zone->color_list[c]);
+	}
+}
+
+/* move a page (size=1<<order) into a order-0 colored cache */
 void ccache_insert(struct zone *zone, struct page *page, int order)
 {
 	int i, color;
@@ -1002,7 +1016,7 @@ void ccache_insert(struct zone *zone, struct page *page, int order)
 	list_del(&page->lru);
 	rmv_page_order(page);
 	zone->free_area[order].nr_free--;
-
+	
 	/* insert pages to zone->color_list[] (all order-0) */
 	for (i = 0; i < (1<<order); i++) {
 		color = page_to_pfn(&page[i]) % MAX_CACHE_COLORS;
@@ -1013,12 +1027,13 @@ void ccache_insert(struct zone *zone, struct page *page, int order)
 		list_add_tail(&page[i].lru, &zone->color_list[color]);
 		set_bit(color, &zone->color_bitmap);
 		zone->free_area[0].nr_free++;
-		set_page_order(&page[i], 0);
+		rmv_page_order(&page[i]);
 	}
 	memdbg(4, "add pfn %ld (order=%d,zone=%s)\n", 
 	       page_to_pfn(page), order, zone->name);
 }
 
+/* return a colored page (order-0) and remove it from the colored cache */
 struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap)
 {
 	struct page *page;
@@ -1050,7 +1065,6 @@ struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap)
 	list_del(&page->lru);
 	if (list_empty(&zone->color_list[c]))
 		clear_bit(c, &zone->color_bitmap);
-	rmv_page_order(page);
 	zone->free_area[0].nr_free--;
 
 	memdbg(5, "- del pfn %ld from color_list[%d]\n",
@@ -1077,6 +1091,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	struct phdusa *ph;
 	struct color_stat *stat = &color_page_alloc.stat;
 	int iters;
+	int retries;
 
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
@@ -1132,13 +1147,17 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 		return page;
 	}
-	
+
+	retries = 0;
+retry:
 	/* Find a page of the appropriate size in the preferred list */
 	for (current_order = order; current_order < MAX_ORDER; ++current_order) {
 		area = &(zone->free_area[current_order]);
 		if (list_empty(&area->free_list[migratetype])) {
 			unsigned long tmpmask;
-			if (current_order == 0 && migratetype == MIGRATE_MOVABLE) {
+			if (retries == 0 && 
+			    current_order == 0 && migratetype == MIGRATE_MOVABLE) 
+			{
 				bitmap_fill(&tmpmask, MAX_CACHE_COLORS);
 				page = ccache_find_cmap(zone, tmpmask);
 				if (page)
@@ -1153,6 +1172,10 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		area->nr_free--;
 		expand(zone, page, order, current_order, area, migratetype);
 		return page;
+	}
+	if (retries++ == 0) {
+		ccache_flush(zone);
+		goto retry;
 	}
 	return NULL;
 }
@@ -6218,6 +6241,9 @@ __offline_isolated_pages(unsigned long start_pfn, unsigned long end_pfn)
 		return;
 	zone = page_zone(pfn_to_page(pfn));
 	spin_lock_irqsave(&zone->lock, flags);
+#ifdef CONFIG_CGROUP_PHDUSA
+	ccache_flush(zone);
+#endif
 	pfn = start_pfn;
 	while (pfn < end_pfn) {
 		if (!pfn_valid(pfn)) {
