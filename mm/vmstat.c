@@ -803,28 +803,44 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 	int order;
 #ifdef CONFIG_CGROUP_PHDUSA
 	int color, mt;
-	seq_printf(m, "\n");
-	for (color = 0; color < MAX_CACHE_COLORS; color++) {
-		seq_printf(m, "Color %15d ", color);
-		for (order = 0; order < MAX_ORDER; order++) {
-			int cnt = 0;
-			struct free_area *area;
-			struct list_head *curr;
+	int cnt;
+	struct free_area *area;
+	struct list_head *curr;
 
+	seq_printf(m, "-------\n");
+	/* order by memory type */
+	for (mt = 0; mt < MIGRATE_ISOLATE; mt++) {
+		seq_printf(m, "- %17s[%d]", "mt", mt);
+		for (order = 0; order < MAX_ORDER; order++) {
 			area = &(zone->free_area[order]);
-			mt = MIGRATE_MOVABLE;
-			list_for_each(curr, &area->free_list[mt]) {
-				struct page *page;
-				int i;
-				/* high order page can match multiple colors */
-				page = list_entry(curr, struct page, lru);
-				for (i = 0; i < (1<<order); i++) {
-					int c, pfn;
-					pfn = page_to_pfn(&page[i]);
-					c = pfn % MAX_CACHE_COLORS;
-					if (c == color) {
-						cnt++;
-						break;
+			cnt = 0;
+			list_for_each(curr, &area->free_list[mt])
+				cnt++;
+			seq_printf(m, "%6d ", cnt);
+		}
+		seq_printf(m, "\n");
+	}
+	/* order by color */
+	seq_printf(m, "-------\n");
+	for (color = 0; color < MAX_CACHE_COLORS; color++) {
+		seq_printf(m, "- %17s[%d]", "color", color);
+		for (order = 0; order < MAX_ORDER; order++) {
+			area = &(zone->free_area[order]);
+			cnt = 0;
+			for (mt = 0; mt < MIGRATE_ISOLATE; mt++) {
+				list_for_each(curr, &area->free_list[mt]) {
+					struct page *page;
+					int i;
+					/* high order page can match multiple colors */
+					page = list_entry(curr, struct page, lru);
+					for (i = 0; i < (1<<order); i++) {
+						int c, pfn;
+						pfn = page_to_pfn(&page[i]);
+						c = pfn % MAX_CACHE_COLORS;
+						if (c == color) {
+							cnt++;
+							break;
+						}
 					}
 				}
 			}
@@ -833,6 +849,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 		seq_printf(m, "\n");
 	}
 #endif
+
 	seq_printf(m, "Node %d, zone %8s ", pgdat->node_id, zone->name);
 	for (order = 0; order < MAX_ORDER; ++order)
 		seq_printf(m, "%6lu ", zone->free_area[order].nr_free);
