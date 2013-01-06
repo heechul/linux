@@ -116,8 +116,14 @@ static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf
 	} else if (!strncmp(buf, "flush", 5)) {
 		struct zone *zone;
 		printk(KERN_INFO "flush color cache...\n");
-		for_each_zone(zone)
+		for_each_populated_zone(zone) {
+			unsigned long flags;
+			if (!zone) 
+				continue;
+			spin_lock_irqsave(&zone->lock, flags);
 			ccache_flush(zone);
+			spin_unlock_irqrestore(&zone->lock, flags);
+		}
 	}
         *ppos += cnt;
         return cnt;
@@ -663,7 +669,7 @@ static inline int page_is_buddy(struct page *page, struct page *buddy,
  * -- wli
  */
 
-static inline void __free_one_page(struct page *page,
+static /* inline */ void __free_one_page(struct page *page,
 		struct zone *zone, unsigned int order,
 		int migratetype)
 {
@@ -1011,7 +1017,9 @@ static inline unsigned long list_count(struct list_head *head)
 	return n;
 }
 
-/* move all color_list pages into free_area[0].freelist[2] */
+/* move all color_list pages into free_area[0].freelist[2]
+ * zone->lock must be hold before calling this function
+ */
 static void ccache_flush(struct zone *zone)
 {
 	int c;
@@ -1021,8 +1029,9 @@ static void ccache_flush(struct zone *zone)
 
 		list_for_each_safe(curr, tmp, &zone->color_list[c]) {
 			struct page *page = list_entry(curr, struct page, lru);
+			list_del_init(&page->lru);
 			__free_one_page(page, zone, 0, MIGRATE_MOVABLE);
-			list_del(curr);
+			zone->free_area[0].nr_free--;
 		}
 		clear_bit(c, &zone->color_bitmap);
 		INIT_LIST_HEAD(&zone->color_list[c]);
@@ -1045,11 +1054,11 @@ static void ccache_insert(struct zone *zone, struct page *page, int order)
 		/* add to zone->color_list[color] */
 		memdbg(5, "- add pfn %ld to color_list[%d]\n", 
 		       page_to_pfn(&page[i]), color);
-
+		INIT_LIST_HEAD(&page[i].lru);
 		list_add_tail(&page[i].lru, &zone->color_list[color]);
 		set_bit(color, &zone->color_bitmap);
 		zone->free_area[0].nr_free++;
-		__ClearPageBuddy(&page[i]);
+		rmv_page_order(&page[i]);
 	}
 	memdbg(4, "add pfn %ld (order=%d,zone=%s)\n", 
 	       page_to_pfn(page), order, zone->name);
