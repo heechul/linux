@@ -87,9 +87,6 @@ static inline int get_pageblock_migratetype(struct page *page)
 struct free_area {
 	struct list_head	free_list[MIGRATE_TYPES];
 	unsigned long		nr_free;
-#ifdef CONFIG_CGROUP_PHDUSA
-	unsigned long           colormap;
-#endif
 };
 
 struct pglist_data;
@@ -393,7 +390,11 @@ struct zone {
 	struct free_area	free_area[MAX_ORDER];
 
 #ifdef CONFIG_CGROUP_PHDUSA
-	struct free_area        color_area[MAX_CACHE_COLORS];
+	/*
+	 * Color page cache. for movable type free pages of order-0
+	 */
+	struct list_head        color_list[MAX_CACHE_COLORS];
+	unsigned long           color_bitmap;
 #endif
 
 #ifndef CONFIG_SPARSEMEM
