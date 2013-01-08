@@ -87,6 +87,7 @@ struct color_stat {
 	s64 cache_acc_cnt;
 	
 	s64 flush_cnt;
+	ktime_t start;     /* start time of the current iteration */
 };
 
 static struct {
@@ -1023,18 +1024,27 @@ static inline unsigned long list_count(struct list_head *head)
 static void ccache_flush(struct zone *zone)
 {
 	int c;
+	struct page *page;
 	memdbg(2, "flush the ccache for zone %s\n", zone->name);
-	for (c = 0; c < MAX_CACHE_COLORS; c++) {
-		struct list_head *curr, *tmp;
 
-		list_for_each_safe(curr, tmp, &zone->color_list[c]) {
-			struct page *page = list_entry(curr, struct page, lru);
-			list_del_init(&page->lru);
-			__free_one_page(page, zone, 0, MIGRATE_MOVABLE);
-			zone->free_area[0].nr_free--;
+	while (1) {
+		for (c = 0; c < MAX_CACHE_COLORS; c++) {
+			if (!list_empty(&zone->color_list[c])) {
+				page = list_entry(zone->color_list[c].next, 
+						  struct page, lru);
+				list_del_init(&page->lru);
+				__free_one_page(page, zone, 0, MIGRATE_MOVABLE);
+				zone->free_area[0].nr_free--;
+			}
+
+			if (list_empty(&zone->color_list[c])) {
+				clear_bit(c, &zone->color_bitmap);
+				INIT_LIST_HEAD(&zone->color_list[c]);
+			}
 		}
-		clear_bit(c, &zone->color_bitmap);
-		INIT_LIST_HEAD(&zone->color_list[c]);
+
+		if (bitmap_weight(&zone->color_bitmap, MAX_CACHE_COLORS) == 0)
+			break;
 	}
 }
 
@@ -1071,7 +1081,8 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 	struct page *page;
 	unsigned long tmpmask;
 	int c;
-	
+	int rand_seed;
+
 	/* cache statistics */
 	if (stat) stat->cache_acc_cnt++;
 
@@ -1080,7 +1091,13 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 		return NULL;
 	bitmap_and(&tmpmask, &zone->color_bitmap, &cmap, MAX_CACHE_COLORS);
 
-	c = find_first_bit(&tmpmask, MAX_CACHE_COLORS);
+
+	/*randomly find a bit among the candidates */
+	rand_seed = (stat->start.tv64) % bitmap_weight(&tmpmask, MAX_CACHE_COLORS);
+	for_each_set_bit(c, &tmpmask, MAX_CACHE_COLORS) {
+		if (rand_seed-- <= 0) 
+			break;
+	}
 
 	BUG_ON(c >= MAX_CACHE_COLORS);
 	BUG_ON(list_empty(&zone->color_list[c]));
@@ -1106,14 +1123,14 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 }
 
 static inline void 
-update_stat(struct color_stat *stat, struct page *page, ktime_t start, int iters)
+update_stat(struct color_stat *stat, struct page *page, int iters)
 {
 	ktime_t dur;
 
 	if (memdbg_enable == 0)
 		return;
 
-	dur = ktime_sub(ktime_get(), start);
+	dur = ktime_sub(ktime_get(), stat->start);
 
 	stat->min_ns = min(dur.tv64, stat->min_ns);
 	stat->max_ns = max(dur.tv64, stat->max_ns);
@@ -1150,7 +1167,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	int iters = 0;
 
 	if (memdbg_enable > 0)
-		start = ktime_get();
+		c_stat->start = n_stat->start = f_stat->start = ktime_get();
 
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
@@ -1166,7 +1183,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		/* find in the cache */
 		page = ccache_find_cmap(zone, ph->colormap, c_stat);
 		if (page) {
-			update_stat(c_stat, page, start, iters);
+			update_stat(c_stat, page, iters);
 			return page;
 		}
 		memdbg(2, "search lists in all orders\n");
@@ -1184,7 +1201,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				ccache_insert(zone, page, current_order);
 				page = ccache_find_cmap(zone, ph->colormap, c_stat);
 				if (page) {
-					update_stat(c_stat, page, start, iters);
+					update_stat(c_stat, page, iters);
 					return page;
 				}
 			}
@@ -1194,7 +1211,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		/* find in the cache */
 		page = ccache_find_cmap(zone, 0xffffffff, c_stat);
 		if (page) {
-			update_stat(f_stat, page, start, iters);
+			update_stat(f_stat, page, iters);
 			return page;
 		}
 	} else {
@@ -1210,9 +1227,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 					  struct page, lru);
 
 			if (retries == 0)
-				update_stat(n_stat, page, start, iters);
+				update_stat(n_stat, page, iters);
 			else
-				update_stat(f_stat, page, start, iters);
+				update_stat(f_stat, page, iters);
 
 			list_del(&page->lru);
 			rmv_page_order(page);
@@ -1227,7 +1244,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			if (order == 0) {
 				page = ccache_find_cmap(zone, 0xffffffff, n_stat);
 				if (page) {
-					update_stat(n_stat, page, start, iters);
+					update_stat(n_stat, page, iters);
 					return page;
 				}
 			} else if (retries == 0) {
