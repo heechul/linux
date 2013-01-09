@@ -112,7 +112,7 @@ static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf
 		printk(KERN_INFO "reset statistics...\n");
 		for (i = 0; i < ARRAY_SIZE(color_page_alloc.stat); i++) {
 			memset(&color_page_alloc.stat[i], 0, sizeof(struct color_stat));
-			color_page_alloc.stat[i].min_ns = 0xffffffff;
+			color_page_alloc.stat[i].min_ns = 0x7fffffff;
 		}
 	} else if (!strncmp(buf, "flush", 5)) {
 		struct zone *zone;
@@ -178,7 +178,7 @@ static int __init color_page_alloc_debugfs(void)
 	/* statistics initialization */
 	for (i = 0; i < ARRAY_SIZE(color_page_alloc.stat); i++) {
 		memset(&color_page_alloc.stat[i], 0, sizeof(struct color_stat));
-		color_page_alloc.stat[i].min_ns = 0xffffffff;
+		color_page_alloc.stat[i].min_ns = 0x7fffffff;
 	}
 
         if (!dir)
@@ -1072,6 +1072,7 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 	unsigned long tmpmask;
 	int c;
 	int rand_seed;
+	s64 start = stat->start.tv64;
 
 	/* cache statistics */
 	if (stat) stat->cache_acc_cnt++;
@@ -1081,14 +1082,12 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 		return NULL;
 	bitmap_and(&tmpmask, &zone->color_bitmap, &cmap, MAX_CACHE_COLORS);
 
-
 	/*randomly find a bit among the candidates */
-	rand_seed = do_div(stat->start.tv64, bitmap_weight(&tmpmask, MAX_CACHE_COLORS));
+	rand_seed = do_div(start, bitmap_weight(&tmpmask, MAX_CACHE_COLORS));
 	for_each_set_bit(c, &tmpmask, MAX_CACHE_COLORS) {
 		if (rand_seed-- <= 0) 
 			break;
 	}
-
 	BUG_ON(c >= MAX_CACHE_COLORS);
 	BUG_ON(list_empty(&zone->color_list[c]));
 
