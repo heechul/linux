@@ -1071,8 +1071,7 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 	struct page *page;
 	unsigned long tmpmask;
 	int c;
-	int rand_seed;
-	s64 start = stat->start.tv64;
+	int rand_seed = (int)(stat->start.tv64);
 
 	/* cache statistics */
 	if (stat) stat->cache_acc_cnt++;
@@ -1083,7 +1082,7 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 	bitmap_and(&tmpmask, &zone->color_bitmap, &cmap, MAX_CACHE_COLORS);
 
 	/*randomly find a bit among the candidates */
-	rand_seed = do_div(start, bitmap_weight(&tmpmask, MAX_CACHE_COLORS));
+	rand_seed = rand_seed % bitmap_weight(&tmpmask, MAX_CACHE_COLORS);
 	for_each_set_bit(c, &tmpmask, MAX_CACHE_COLORS) {
 		if (rand_seed-- <= 0) 
 			break;
