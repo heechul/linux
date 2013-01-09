@@ -175,27 +175,17 @@ static int __init color_page_alloc_debugfs(void)
 
         dir = debugfs_create_dir("color_page_alloc", NULL);
 
-	color_page_alloc.colors = MAX_CACHE_COLORS; /* = LLC_SIZE / WAYS / 4K, TODO*/
-
 	/* statistics initialization */
 	for (i = 0; i < ARRAY_SIZE(color_page_alloc.stat); i++) {
 		memset(&color_page_alloc.stat[i], 0, sizeof(struct color_stat));
 		color_page_alloc.stat[i].min_ns = 0xffffffff;
 	}
 
-	/* default setting */
-	color_page_alloc.enabled = 2; /* use color bitmap optimization */
-	color_page_alloc.colors = MAX_CACHE_COLORS;
-
         if (!dir)
                 return PTR_ERR(dir);
-        if (!debugfs_create_u32("enable", mode, dir, &color_page_alloc.enabled))
-                goto fail;
-        if (!debugfs_create_u32("colors", mode, dir, &color_page_alloc.colors))
-                goto fail;
         if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
                 goto fail;
-        if (!debugfs_create_file("core", mode, dir, NULL, &color_page_alloc_fops))
+        if (!debugfs_create_file("control", mode, dir, NULL, &color_page_alloc_fops))
                 goto fail;
         return 0;
 fail:
@@ -1093,7 +1083,7 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 
 
 	/*randomly find a bit among the candidates */
-	rand_seed = (stat->start.tv64) % bitmap_weight(&tmpmask, MAX_CACHE_COLORS);
+	rand_seed = do_div(stat->start.tv64, bitmap_weight(&tmpmask, MAX_CACHE_COLORS));
 	for_each_set_bit(c, &tmpmask, MAX_CACHE_COLORS) {
 		if (rand_seed-- <= 0) 
 			break;
