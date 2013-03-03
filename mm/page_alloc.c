@@ -1147,7 +1147,6 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	struct list_head *curr, *tmp;
 	struct page *page;
 	int use_color = 0;
-	ktime_t start = ktime_set(0,0);
 	struct phdusa *ph;
 	struct color_stat *c_stat = &color_page_alloc.stat[0];
 	struct color_stat *n_stat = &color_page_alloc.stat[1];
@@ -1244,7 +1243,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	}
 	/* no memory (color or normal) found in this zone */
 	memdbg(1, "No memory(color+normal) in Zone %s: order %d mt %d in %lld ns\n",
-	       zone->name, order, migratetype, ktime_sub(ktime_get(), start).tv64);
+	       zone->name, order, migratetype, ktime_sub(ktime_get(), f_stat->start).tv64);
 	return NULL;
 }
 #else /* !CONFIG_CGROUP_PHDUSA */
