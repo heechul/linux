@@ -8705,6 +8705,11 @@ static int __cfs_schedulable(struct task_group *tg, u64 period, u64 runtime);
 
 #include <linux/slab.h>
 
+unsigned long nr_running_cpu(int cpu)
+{
+	return cpu_rq(cpu)->nr_running;
+}
+
 /**
  * throttle tasks on a specific cpu
  *
@@ -8825,6 +8830,7 @@ void register_throttle_period_callback(void *func)
 	tq_period_callback = func;
 }
 
+EXPORT_SYMBOL(nr_running_cpu);
 EXPORT_SYMBOL(throttle_rq_cpu);
 EXPORT_SYMBOL(unthrottle_rq_cpu);
 EXPORT_SYMBOL(register_throttle_period_callback);
