@@ -318,7 +318,7 @@ int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
 	 * send smp call function interrupt to this cpu and as such deadlocks
 	 * can't happen.
 	 */
-	WARN_ON_ONCE(cpu_online(this_cpu) && irqs_disabled()
+	WARN_ON_ONCE(cpu_online(this_cpu) && irqs_disabled() && wait
 		     && !oops_in_progress);
 
 	if (cpu == this_cpu) {
@@ -457,7 +457,7 @@ void smp_call_function_many(const struct cpumask *mask,
 	 * send smp call function interrupt to this cpu and as such deadlocks
 	 * can't happen.
 	 */
-	WARN_ON_ONCE(cpu_online(this_cpu) && irqs_disabled()
+	WARN_ON_ONCE(cpu_online(this_cpu) && wait & irqs_disabled() && wait
 		     && !oops_in_progress && !early_boot_irqs_disabled);
 
 	/* Try to fastpath.  So, what's a CPU they want? Ignoring this one. */
@@ -703,13 +703,14 @@ EXPORT_SYMBOL(on_each_cpu);
 void on_each_cpu_mask(const struct cpumask *mask, smp_call_func_t func,
 			void *info, bool wait)
 {
+	unsigned long flags;
 	int cpu = get_cpu();
 
 	smp_call_function_many(mask, func, info, wait);
 	if (cpumask_test_cpu(cpu, mask)) {
-		local_irq_disable();
+		local_irq_save(flags);
 		func(info);
-		local_irq_enable();
+		local_irq_restore(flags);
 	}
 	put_cpu();
 }
