@@ -1038,6 +1038,8 @@ static void ccache_flush(struct zone *zone)
 	}
 }
 
+#define page_to_color(addr) ((page_to_pfn(addr) >> 2) % MAX_CACHE_COLORS)
+
 /* move a page (size=1<<order) into a order-0 colored cache */
 static void ccache_insert(struct zone *zone, struct page *page, int order)
 {
@@ -1050,7 +1052,14 @@ static void ccache_insert(struct zone *zone, struct page *page, int order)
 	
 	/* insert pages to zone->color_list[] (all order-0) */
 	for (i = 0; i < (1<<order); i++) {
-		color = page_to_pfn(&page[i]) % MAX_CACHE_COLORS;
+		color = page_to_color(&page[i]);
+		/*
+		   page[14:12]:
+		   color = page_to_pfn(&page[i]) % MAX_CACHE_COLORS;
+		   
+		   bank[16:14]:
+		   color = (page_to_pfn(&page[i]) >> 2) % MAX_CACHE_COLORS;
+		*/
 		/* add to zone->color_list[color] */
 		memdbg(5, "- add pfn %ld to color_list[%d]\n", 
 		       page_to_pfn(&page[i]), color);
@@ -1081,7 +1090,7 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 		return NULL;
 	bitmap_and(&tmpmask, &zone->color_bitmap, &cmap, MAX_CACHE_COLORS);
 
-	/*randomly find a bit among the candidates */
+	/* randomly find a bit among the candidates */
 	rand_seed = rand_seed % bitmap_weight(&tmpmask, MAX_CACHE_COLORS);
 	for_each_set_bit(c, &tmpmask, MAX_CACHE_COLORS) {
 		if (rand_seed-- <= 0) 
@@ -1092,7 +1101,7 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 
 	page = list_entry(zone->color_list[c].next, struct page, lru);
 
-	BUG_ON(page_to_pfn(page) % MAX_CACHE_COLORS != c);
+	BUG_ON(page_to_color(page) != c);
 
 	memdbg(4, "found pfn %ld (color=%d,zone=%s)\n", 
 	       page_to_pfn(page), c, zone->name);
@@ -1130,7 +1139,7 @@ update_stat(struct color_stat *stat, struct page *page, int iters)
 
 	memdbg(2, "order %ld pfn 0x%08lx color %d iters %d in %lld ns\n",
 	       page_order(page), page_to_pfn(page), 
-	       (int)(page_to_pfn(page) % MAX_CACHE_COLORS),
+	       (int)page_to_color(page),
 	       iters, dur.tv64);
 }
 
