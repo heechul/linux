@@ -70,7 +70,7 @@ enum {
 #endif
 
 #ifdef CONFIG_CGROUP_PHDUSA
-#  define MAX_CACHE_COLORS 8
+#  define MAX_CACHE_BINS 32
 #endif
 
 #define for_each_migratetype_order(order, type) \
@@ -393,7 +393,7 @@ struct zone {
 	/*
 	 * Color page cache. for movable type free pages of order-0
 	 */
-	struct list_head        color_list[MAX_CACHE_COLORS];
+	struct list_head        color_list[MAX_CACHE_BINS];
 	unsigned long           color_bitmap;
 #endif
 

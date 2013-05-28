@@ -69,6 +69,14 @@
 int memdbg_enable = 0;
 EXPORT_SYMBOL(memdbg_enable);
 
+int sysctl_cache_color_bits = 3;
+#if USE_DRAM_AWARE
+int sysctl_dram_bank_shift = 14;
+int sysctl_dram_bank_bits = 3; /* 2<<3 = 8 */
+int sysctl_dram_rank_shift = 17;
+int sysctl_dram_rank_bits = 2; /* 2<<2 = 4 */
+#endif /* USE_DRAM_AWARE */
+
 #define memdbg(lvl, fmt, ...)					\
         do {                                                    \
 		if(memdbg_enable >= lvl)			\
@@ -85,7 +93,7 @@ struct color_stat {
 
 	s64 cache_hit_cnt; /* hit rate = cache_hit_cnt / cache_acc_cnt */
 	s64 cache_acc_cnt;
-	
+
 	s64 flush_cnt;
 	ktime_t start;     /* start time of the current iteration */
 };
@@ -119,7 +127,7 @@ static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf
 		printk(KERN_INFO "flush color cache...\n");
 		for_each_populated_zone(zone) {
 			unsigned long flags;
-			if (!zone) 
+			if (!zone)
 				continue;
 			spin_lock_irqsave(&zone->lock, flags);
 			ccache_flush(zone);
@@ -144,14 +152,20 @@ static int color_page_alloc_show(struct seq_file *m, void *v)
 			   stat->tot_cnt);
 		seq_printf(m, "  hit rate: %lld/%lld (%lld %%)\n",
 			   stat->cache_hit_cnt, stat->cache_acc_cnt,
-			   (stat->cache_acc_cnt) ? 
+			   (stat->cache_acc_cnt) ?
 			   div64_u64(stat->cache_hit_cnt * 100, stat->cache_acc_cnt) : 0);
 		seq_printf(m, "  avg iter: %lld (%lld/%lld)\n",
-			   (stat->tot_cnt) ? 
+			   (stat->tot_cnt) ?
 			   div64_u64(stat->iter_cnt, stat->tot_cnt) : 0,
 			   stat->iter_cnt, stat->tot_cnt);
 		seq_printf(m, "  flush cnt: %lld\n", stat->flush_cnt);
 	}
+
+	seq_printf(m, "Cache colors: %d\n", 1 << sysctl_cache_color_bits);
+#if USE_DRAM_AWARE
+	seq_printf(m, "DRAM ranks: %d\n", 1 << sysctl_dram_rank_bits);
+	seq_printf(m, "DRAM banks: %d\n", 1 << sysctl_dram_bank_bits);
+#endif
         return 0;
 }
 static int color_page_alloc_open(struct inode *inode, struct file *filp)
@@ -183,10 +197,22 @@ static int __init color_page_alloc_debugfs(void)
 
         if (!dir)
                 return PTR_ERR(dir);
-        if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
-                goto fail;
         if (!debugfs_create_file("control", mode, dir, NULL, &color_page_alloc_fops))
                 goto fail;
+        if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
+                goto fail;
+#if USE_DRAM_AWARE
+	if (!debugfs_create_u32("dram_bank_shift", mode, dir, &sysctl_dram_bank_shift))
+		goto fail;
+	if (!debugfs_create_u32("dram_bank_bits", mode, dir, &sysctl_dram_bank_bits))
+		goto fail;
+	if (!debugfs_create_u32("dram_rank_shift", mode, dir, &sysctl_dram_rank_shift))
+		goto fail;
+	if (!debugfs_create_u32("dram_rank_bits", mode, dir, &sysctl_dram_rank_bits))
+		goto fail;
+#endif /* USE_DRAM_AWARE */
+	if (!debugfs_create_u32("cache_color_bits", mode, dir, &sysctl_cache_color_bits))
+		goto fail;
         return 0;
 fail:
         debugfs_remove_recursive(dir);
@@ -998,6 +1024,7 @@ static int prep_new_page(struct page *page, int order, gfp_t gfp_flags)
 
 #ifdef CONFIG_CGROUP_PHDUSA
 
+
 /* debug */
 static inline unsigned long list_count(struct list_head *head)
 {
@@ -1018,7 +1045,7 @@ static void ccache_flush(struct zone *zone)
 	memdbg(2, "flush the ccache for zone %s\n", zone->name);
 
 	while (1) {
-		for (c = 0; c < MAX_CACHE_COLORS; c++) {
+		for (c = 0; c < MAX_CACHE_BINS; c++) {
 			if (!list_empty(&zone->color_list[c])) {
 				page = list_entry(zone->color_list[c].next, 
 						  struct page, lru);
@@ -1033,12 +1060,10 @@ static void ccache_flush(struct zone *zone)
 			}
 		}
 
-		if (bitmap_weight(&zone->color_bitmap, MAX_CACHE_COLORS) == 0)
+		if (bitmap_weight(&zone->color_bitmap, MAX_CACHE_BINS) == 0)
 			break;
 	}
 }
-
-#define page_to_color(addr) ((page_to_pfn(addr) >> 2) % MAX_CACHE_COLORS)
 
 /* move a page (size=1<<order) into a order-0 colored cache */
 static void ccache_insert(struct zone *zone, struct page *page, int order)
@@ -1061,16 +1086,15 @@ static void ccache_insert(struct zone *zone, struct page *page, int order)
 		   color = (page_to_pfn(&page[i]) >> 2) % MAX_CACHE_COLORS;
 		*/
 		/* add to zone->color_list[color] */
-		memdbg(5, "- add pfn %ld to color_list[%d]\n", 
-		       page_to_pfn(&page[i]), color);
+		memdbg(5, "- add pfn %ld (0x%08llx) to color_list[%d]\n", 
+		       page_to_pfn(&page[i]), (u64)page_to_phys(&page[i]), color);
 		INIT_LIST_HEAD(&page[i].lru);
 		list_add_tail(&page[i].lru, &zone->color_list[color]);
 		set_bit(color, &zone->color_bitmap);
 		zone->free_area[0].nr_free++;
 		rmv_page_order(&page[i]);
 	}
-	memdbg(4, "add pfn %ld (order=%d,zone=%s)\n", 
-	       page_to_pfn(page), order, zone->name);
+	memdbg(4, "add order=%d zone=%s\n", order, zone->name);
 }
 
 /* return a colored page (order-0) and remove it from the colored cache */
@@ -1084,27 +1108,32 @@ static struct page *ccache_find_cmap(struct zone *zone, unsigned long cmap,
 
 	/* cache statistics */
 	if (stat) stat->cache_acc_cnt++;
-
+	
 	/* find color cache entry */
-	if (!bitmap_intersects(&zone->color_bitmap, &cmap, MAX_CACHE_COLORS))
+	if (!bitmap_intersects(&zone->color_bitmap, &cmap, MAX_CACHE_BINS))
 		return NULL;
-	bitmap_and(&tmpmask, &zone->color_bitmap, &cmap, MAX_CACHE_COLORS);
-
-	/* randomly find a bit among the candidates */
-	rand_seed = rand_seed % bitmap_weight(&tmpmask, MAX_CACHE_COLORS);
-	for_each_set_bit(c, &tmpmask, MAX_CACHE_COLORS) {
+	bitmap_and(&tmpmask, &zone->color_bitmap, &cmap, MAX_CACHE_BINS);
+	
+	/*randomly find a bit among the candidates */
+        rand_seed = rand_seed % bitmap_weight(&tmpmask, MAX_CACHE_BINS);
+	for_each_set_bit(c, &tmpmask, MAX_CACHE_BINS) {
 		if (rand_seed-- <= 0) 
 			break;
 	}
-	BUG_ON(c >= MAX_CACHE_COLORS);
+	BUG_ON(c >= MAX_CACHE_BINS);
 	BUG_ON(list_empty(&zone->color_list[c]));
-
+	
 	page = list_entry(zone->color_list[c].next, struct page, lru);
-
-	BUG_ON(page_to_color(page) != c);
-
+	
+#if USE_DRAM_AWARE
+	memdbg(4, "found pfn %ld(0x%08llx)(color=%d,rank=%d,bank=%d,zone=%s)\n", 
+	       page_to_pfn(page), (u64)page_to_phys(page),
+	       c, COLOR_TO_DRAM_RANK(c), COLOR_TO_DRAM_BANK(c), zone->name);
+#else
 	memdbg(4, "found pfn %ld (color=%d,zone=%s)\n", 
 	       page_to_pfn(page), c, zone->name);
+#endif
+	BUG_ON(page_to_color(page) != c);
 
 	/* remove from the zone->color_list[color] */
 	list_del(&page->lru);
@@ -1137,8 +1166,8 @@ update_stat(struct color_stat *stat, struct page *page, int iters)
 
 	stat->tot_cnt++;
 
-	memdbg(2, "order %ld pfn 0x%08lx color %d iters %d in %lld ns\n",
-	       page_order(page), page_to_pfn(page), 
+	memdbg(2, "order %ld pfn %ld(0x%08llx) color %d iters %d in %lld ns\n",
+	       page_order(page), page_to_pfn(page), (u64)page_to_phys(page),
 	       (int)page_to_color(page),
 	       iters, dur.tv64);
 }
@@ -1156,28 +1185,49 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	struct list_head *curr, *tmp;
 	struct page *page;
 	int use_color = 0;
+	ulong cmap = 0xffffffff;
+	ktime_t start = ktime_set(0,0);
 	struct phdusa *ph;
 	struct color_stat *c_stat = &color_page_alloc.stat[0];
 	struct color_stat *n_stat = &color_page_alloc.stat[1];
 	struct color_stat *f_stat = &color_page_alloc.stat[2];
 	int iters = 0;
-
+	
 	if (memdbg_enable > 0)
 		c_stat->start = n_stat->start = f_stat->start = ktime_get();
 
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
-	if (ph && bitmap_weight(&ph->colormap, MAX_CACHE_COLORS) > 0)
+#if USE_DRAM_AWARE
+	if (ph && (bitmap_weight(&ph->dram_rankmap, 1<<sysctl_dram_rank_bits) &&
+		   bitmap_weight(&ph->dram_bankmap, 1<<sysctl_dram_bank_bits)))
+	{
+		int rank, bank;
 		use_color = 1;
+		cmap = 0;
+		for_each_set_bit(rank, &ph->dram_rankmap, 1<<sysctl_dram_rank_bits) {
+			for_each_set_bit(bank, &ph->dram_bankmap, 1<<sysctl_dram_bank_bits) {
+				cmap |= (1 << (dram_addr_to_color(rank, bank)));
+			}
+		}
+	} else 
+#endif
+	if (ph && bitmap_weight(&ph->colormap, 1<<sysctl_cache_color_bits) > 0){
+		use_color = 1;
+		cmap = ph->colormap;
+	}
+	
+	memdbg(3, "Color usage: %d colormap 0x%08lx (mt=%d)\n", use_color, cmap, migratetype);
 
 	/* check color cache */
-	if (use_color && migratetype == MIGRATE_MOVABLE && order == 0) {
+	if (use_color /*&& migratetype == MIGRATE_MOVABLE */ && order == 0) {
 		iters++; 
 		current_order = 0;
 
 		memdbg(2, "check color cache (mt=%d)\n", migratetype);
 		/* find in the cache */
-		page = ccache_find_cmap(zone, ph->colormap, c_stat);
+		page = ccache_find_cmap(zone, cmap, c_stat);
+		
 		if (page) {
 			update_stat(c_stat, page, iters);
 			return page;
@@ -1195,7 +1245,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				iters++;
 				page = list_entry(curr, struct page, lru);
 				ccache_insert(zone, page, current_order);
-				page = ccache_find_cmap(zone, ph->colormap, c_stat);
+				page = ccache_find_cmap(zone, cmap, c_stat);
 				if (page) {
 					update_stat(c_stat, page, iters);
 					return page;
@@ -1230,7 +1280,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			list_del(&page->lru);
 			rmv_page_order(page);
 			area->nr_free--;
-			expand(zone, page, order, current_order, area, migratetype);
+			expand(zone, page, order, current_order, area, migratetype); 
 
 			return page;
 		}
@@ -1252,7 +1302,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	}
 	/* no memory (color or normal) found in this zone */
 	memdbg(1, "No memory(color+normal) in Zone %s: order %d mt %d in %lld ns\n",
-	       zone->name, order, migratetype, ktime_sub(ktime_get(), f_stat->start).tv64);
+	       zone->name, order, migratetype, ktime_sub(ktime_get(), start).tv64);
 	return NULL;
 }
 #else /* !CONFIG_CGROUP_PHDUSA */
@@ -4195,13 +4245,15 @@ void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 static void __meminit zone_init_free_lists(struct zone *zone)
 {
 	int order, t;
+
 #ifdef CONFIG_CGROUP_PHDUSA
 	int c;
-	for (c = 0; c < MAX_CACHE_COLORS; c++) {
+	for (c = 0; c < MAX_CACHE_BINS; c++) {
 		INIT_LIST_HEAD(&zone->color_list[c]);
-		bitmap_zero(&zone->color_bitmap, MAX_CACHE_COLORS);
 	}
-#endif
+	bitmap_zero(&zone->color_bitmap, MAX_CACHE_BINS);
+#endif /* CONFIG_CGROUP_PHDUSA */
+
 	for_each_migratetype_order(order, t) {
 		INIT_LIST_HEAD(&zone->free_area[order].free_list[t]);
 		zone->free_area[order].nr_free = 0;

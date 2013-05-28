@@ -13,24 +13,29 @@
 #include <linux/err.h>
 #include <linux/fs.h>
 #include <linux/bitmap.h>
+#include <linux/module.h>
 
 /*
- * Check of a page is compliant to the policy defined for the given vma
+ * Check if a page is compliant to the policy defined for the given vma
  */
 #ifdef CONFIG_CGROUP_PHDUSA
 
 #define MAX_LINE_LEN (6*128)
-
-/* 
- * Types of files in a phdusa group 
+/*
+ * Types of files in a phdusa group
  * FILE_COLORS - contain list of colors allowed
+ * FILE_PROFILE - contains the profile information for the task
 */
 typedef enum {
+#if USE_DRAM_AWARE
+	FILE_DRAM_RANK,
+	FILE_DRAM_BANK,
+#endif
 	FILE_COLORS,
 } phdusa_filetype_t;
 
 /*
- * Top level phdusa - mask initialized to zero implying no restriction on 
+ * Top level phdusa - mask initialized to zero implying no restriction on
  * physical pages
 */
 
@@ -51,17 +56,18 @@ struct phdusa * ph_from_subsys(struct cgroup_subsys_state * subsys)
 /*
  * Common write function for files in phdusa cgroup
  */
-static int update_colormask(struct phdusa *ph, const char *buf)
+static int update_bitmask(unsigned long *bitmap, const char *buf, int maxbits)
 {
 	int retval = 0;
 
 	if (!*buf)
-		bitmap_clear(&ph->colormap, 0, MAX_CACHE_COLORS);
+		bitmap_clear(bitmap, 0, maxbits);
 	else
-		retval = bitmap_parselist(buf, &ph->colormap, MAX_CACHE_COLORS);
+		retval = bitmap_parselist(buf, bitmap, maxbits);
 
 	return retval;
 }
+
 
 static int phdusa_file_write(struct cgroup *cgrp, struct cftype *cft,
 			     const char *buf)
@@ -73,8 +79,18 @@ static int phdusa_file_write(struct cgroup *cgrp, struct cftype *cft,
 		return -ENODEV;
 
 	switch (cft->private) {
+#if USE_DRAM_AWARE
+	case FILE_DRAM_RANK:
+		retval = update_bitmask(&ph->dram_rankmap, buf, 1<<sysctl_dram_rank_bits); /* up to 4 ranks */
+		printk(KERN_INFO "Rank : %s\n", buf);
+		break;
+	case FILE_DRAM_BANK:
+		retval = update_bitmask(&ph->dram_bankmap, buf, 1<<sysctl_dram_bank_bits); /* up to 8 banks */
+		printk(KERN_INFO "Bank : %s\n", buf);
+		break;
+#endif
 	case FILE_COLORS:
-		retval = update_colormask(ph, buf);
+		retval = update_bitmask(&ph->colormap, buf, 1<<sysctl_cache_color_bits);
 		break;
 	default:
 		retval = -EINVAL;
@@ -84,7 +100,6 @@ static int phdusa_file_write(struct cgroup *cgrp, struct cftype *cft,
 	cgroup_unlock();
 	return retval;
 }
-
 
 static ssize_t phdusa_file_read(struct cgroup *cgrp,
 				struct cftype *cft,
@@ -103,8 +118,18 @@ static ssize_t phdusa_file_read(struct cgroup *cgrp,
 	s = page;
 
 	switch (cft->private) {
+#if USE_DRAM_AWARE
+	case FILE_DRAM_RANK:
+		s += bitmap_scnlistprintf(s, PAGE_SIZE, &ph->dram_rankmap, 1<<sysctl_dram_rank_bits);
+		printk(KERN_INFO "Rank : %s\n", s);
+		break;
+	case FILE_DRAM_BANK:
+		s += bitmap_scnlistprintf(s, PAGE_SIZE, &ph->dram_bankmap, 1<<sysctl_dram_bank_bits);
+		printk(KERN_INFO "Bank : %s\n", s);
+		break;
+#endif
 	case FILE_COLORS:
-		s += bitmap_scnlistprintf(s, PAGE_SIZE, &ph->colormap, MAX_CACHE_COLORS);
+		s += bitmap_scnlistprintf(s, PAGE_SIZE, &ph->colormap, 1<<sysctl_cache_color_bits);
 		break;
 	default:
 		retval = -EINVAL;
@@ -118,12 +143,29 @@ out:
 	return retval;
 }
 
+
 /*
  * struct cftype: handler definitions for cgroup control files
  *
  * for the common functions, 'private' gives the type of the file
  */
 static struct cftype files[] = {
+#if USE_DRAM_AWARE
+	{
+		.name = "dram_rank",
+		.read = phdusa_file_read,
+		.write_string = phdusa_file_write,
+		.max_write_len = MAX_LINE_LEN,
+		.private = FILE_DRAM_RANK,
+	},
+	{
+		.name = "dram_bank",
+		.read = phdusa_file_read,
+		.write_string = phdusa_file_write,
+		.max_write_len = MAX_LINE_LEN,
+		.private = FILE_DRAM_BANK,
+	},
+#endif
 	{
 		.name = "colors",
 		.read = phdusa_file_read,
@@ -141,11 +183,11 @@ static struct cgroup_subsys_state *phdusa_create(struct cgroup *cgrp)
 {
 	struct phdusa * ph_child;
 	struct phdusa * ph_parent;
-	
+
 	printk(KERN_INFO "Creating the new cgroup - %p\n", cgrp);
 
 	if (!cgrp->parent) {
-		return &top_phdusa.css; 
+		return &top_phdusa.css;
 	}
 	ph_parent = cgroup_ph(cgrp->parent);
 
@@ -153,9 +195,14 @@ static struct cgroup_subsys_state *phdusa_create(struct cgroup *cgrp)
 	if(!ph_child)
 		return ERR_PTR(-ENOMEM);
 
-	bitmap_clear(&ph_child->colormap, 0, MAX_CACHE_COLORS);
+	bitmap_clear(&ph_child->colormap, 0, 1<<sysctl_cache_color_bits);
+#if USE_DRAM_AWARE
+	bitmap_clear(&ph_child->dram_rankmap, 0, 1<<sysctl_dram_rank_bits);
+	bitmap_clear(&ph_child->dram_bankmap, 0, 1<<sysctl_dram_bank_bits);
+#endif
 	return &ph_child->css;
 }
+
 
 /*
  * Destroy an existing phdusa group

@@ -20,6 +20,8 @@
 #include <linux/writeback.h>
 #include <linux/compaction.h>
 
+#include <linux/phdusa.h>
+
 #ifdef CONFIG_VM_EVENT_COUNTERS
 DEFINE_PER_CPU(struct vm_event_state, vm_event_states) = {{0}};
 EXPORT_PER_CPU_SYMBOL(vm_event_states);
@@ -822,7 +824,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 	}
 	/* order by color */
 	seq_printf(m, "-------\n");
-	for (color = 0; color < MAX_CACHE_COLORS; color++) {
+	for (color = 0; color < MAX_CACHE_BINS; color++) {
 		seq_printf(m, "- %17s[%d]", "color", color);
 		for (order = 0; order < MAX_ORDER; order++) {
 			area = &(zone->free_area[order]);
@@ -835,8 +837,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 					page = list_entry(curr, struct page, lru);
 					for (i = 0; i < (1<<order); i++) {
 						int c, pfn;
-						pfn = page_to_pfn(&page[i]);
-						c = pfn % MAX_CACHE_COLORS;
+						c = page_to_color(&page[i]);
 						if (c == color) {
 							cnt++;
 							break;
@@ -848,7 +849,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 		}
 		seq_printf(m, "\n");
 	}
-#endif
+#endif /* !CONFIG_CGROUP_PHDUSA */
 
 	seq_printf(m, "Node %d, zone %8s ", pgdat->node_id, zone->name);
 	for (order = 0; order < MAX_ORDER; ++order)
