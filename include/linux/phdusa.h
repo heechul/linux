@@ -29,25 +29,34 @@ extern int sysctl_dram_bank_shift;
 	(((unsigned)(paddr) >> sysctl_dram_rank_shift) & ((1 << sysctl_dram_rank_bits) - 1))
 #  define paddr_to_dram_bank(paddr) \
 	(((unsigned)(paddr) >> sysctl_dram_bank_shift) & ((1 << sysctl_dram_bank_bits) - 1))
-#  define paddr_to_color(paddr) (						\
-	(paddr_to_dram_rank(paddr) << (sysctl_dram_bank_bits)) |		\
-	(paddr_to_dram_bank(paddr)))
+#  define paddr_to_cache_color(paddr) \
+	(((unsigned)(paddr) >> PAGE_SHIFT) & ((1 << sysctl_cache_color_bits) - 1))
+
+#  define dram_addr_to_color(rank, bank, color)	\
+	((rank << sysctl_dram_bank_bits | bank) << sysctl_cache_color_bits | color)
+
+#  define paddr_to_color(paddr)			      \
+	dram_addr_to_color(			      \
+		paddr_to_dram_rank(paddr),	      \
+		paddr_to_dram_bank(paddr),	      \
+		paddr_to_cache_color(paddr)	      \
+		)
 
 #  define page_to_color(page) paddr_to_color(page_to_phys(page))
-#  define dram_addr_to_color(rank, bank)	(		\
-	rank << sysctl_dram_bank_bits |	bank)
 
-#  define COLOR_TO_DRAM_RANK(c) \
-	((c >> sysctl_dram_bank_bits) & ((1<<sysctl_dram_rank_bits)-1))
-#  define COLOR_TO_DRAM_BANK(c) \
-	(c & ((1<<sysctl_dram_bank_bits)-1))
-#else
-#  define page_to_color(page) (page_to_pfn(page) % (1<<sysctl_cache_color_bits))
+#  define COLOR_TO_DRAM_RANK(c)						\
+	((c >> (sysctl_dram_bank_bits + sysctl_cache_color_bits)) & ((1<<sysctl_dram_rank_bits)-1))
+#  define COLOR_TO_DRAM_BANK(c)						\
+	((c >> sysctl_cache_color_bits) & ((1<<sysctl_dram_bank_bits)-1))
+#  define COLOR_TO_CACHE_COLOR(c)					\
+	(c & ((1<<sysctl_cache_color_bits)-1))
+/* #else */
+/* #  define page_to_color(page) (page_to_pfn(page) % (1<<sysctl_cache_color_bits)) */
 #endif
 
 struct phdusa {
 	struct cgroup_subsys_state css;
-	unsigned long colormap; /* allowed color bitmap.  */
+	unsigned long color_map; /* allowed color bitmap.  */
 #if USE_DRAM_AWARE
 	unsigned long dram_bankmap;
 	unsigned long dram_rankmap;

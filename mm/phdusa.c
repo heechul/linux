@@ -90,7 +90,7 @@ static int phdusa_file_write(struct cgroup *cgrp, struct cftype *cft,
 		break;
 #endif
 	case FILE_COLORS:
-		retval = update_bitmask(&ph->colormap, buf, 1<<sysctl_cache_color_bits);
+		retval = update_bitmask(&ph->color_map, buf, 1<<sysctl_cache_color_bits);
 		break;
 	default:
 		retval = -EINVAL;
@@ -129,7 +129,7 @@ static ssize_t phdusa_file_read(struct cgroup *cgrp,
 		break;
 #endif
 	case FILE_COLORS:
-		s += bitmap_scnlistprintf(s, PAGE_SIZE, &ph->colormap, 1<<sysctl_cache_color_bits);
+		s += bitmap_scnlistprintf(s, PAGE_SIZE, &ph->color_map, 1<<sysctl_cache_color_bits);
 		break;
 	default:
 		retval = -EINVAL;
@@ -195,7 +195,7 @@ static struct cgroup_subsys_state *phdusa_create(struct cgroup *cgrp)
 	if(!ph_child)
 		return ERR_PTR(-ENOMEM);
 
-	bitmap_clear(&ph_child->colormap, 0, 1<<sysctl_cache_color_bits);
+	bitmap_clear(&ph_child->color_map, 0, 1<<sysctl_cache_color_bits);
 #if USE_DRAM_AWARE
 	bitmap_clear(&ph_child->dram_rankmap, 0, 1<<sysctl_dram_rank_bits);
 	bitmap_clear(&ph_child->dram_bankmap, 0, 1<<sysctl_dram_bank_bits);
