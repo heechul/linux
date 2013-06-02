@@ -1199,9 +1199,18 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
 #if USE_DRAM_AWARE
-	if (ph && (bitmap_weight(&ph->dram_rankmap, 1<<sysctl_dram_rank_bits) ||
-		   bitmap_weight(&ph->dram_bankmap, 1<<sysctl_dram_bank_bits) ||
-		   bitmap_weight(&ph->color_map, 1<<sysctl_dram_bank_bits)))
+	if(ph){
+		memdbg(2, "Weights: %d %d %d %d\n", bitmap_weight(&ph->dram_rankmap, 1<<sysctl_dram_rank_bits),
+		       bitmap_weight(&ph->dram_bankmap, 1<<sysctl_dram_bank_bits),
+		       bitmap_weight(&ph->color_map, 1<<sysctl_cache_color_bits),
+		       (bitmap_weight(&ph->dram_rankmap, 1<<sysctl_dram_rank_bits) &&
+		       bitmap_weight(&ph->dram_bankmap, 1<<sysctl_dram_bank_bits) &&
+			bitmap_weight(&ph->color_map, 1<<sysctl_cache_color_bits)) );
+	}
+
+	if (ph && (bitmap_weight(&ph->dram_rankmap, 1<<sysctl_dram_rank_bits) &&
+		   bitmap_weight(&ph->dram_bankmap, 1<<sysctl_dram_bank_bits) &&
+		   bitmap_weight(&ph->color_map, 1<<sysctl_cache_color_bits)))
 	{
 		int rank, bank, color;
 		use_color = 1;
@@ -1213,14 +1222,13 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				}
 			}
 		}
-	} else 
+	}
 #endif
 	/* if (ph && bitmap_weight(&ph->colormap, 1<<sysctl_cache_color_bits) > 0){ */
 	/* 	use_color = 1; */
 	/* 	cmap = ph->colormap; */
 	/* } */
 	
-	memdbg(3, "Color usage: %d colormap 0x%08lx (mt=%d)\n", use_color, cmap[0], migratetype);
 
 	/* check color cache */
 	if (use_color /*&& migratetype == MIGRATE_MOVABLE */ && order == 0) {
@@ -1233,6 +1241,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		
 		if (page) {
 			update_stat(c_stat, page, iters);
+			memdbg(1, "Found colored page in cache 0x%lx\n", page_to_pfn(page));
 			return page;
 		}
 		memdbg(2, "search lists in all orders\n");
@@ -1251,6 +1260,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				page = ccache_find_cmap(zone, cmap, c_stat);
 				if (page) {
 					update_stat(c_stat, page, iters);
+					memdbg(1, "Found colored page after scan 0x%lx\n",
+					       page_to_pfn(page));
 					return page;
 				}
 			}
@@ -1887,9 +1898,13 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 	unsigned long flags;
 	struct page *page;
 	int cold = !!(gfp_flags & __GFP_COLD);
-
+	struct phdusa * ph;
+	
+	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
+		
 again:
-	if (likely(order == 0)) {
+	/* Skip PCP when physically-aware allocation is requested */
+	if (likely(order == 0) && !ph) {
 		struct per_cpu_pages *pcp;
 		struct list_head *list;
 
