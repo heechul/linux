@@ -17,20 +17,20 @@
 #define USE_DRAM_AWARE 1 /* heechul for dram aware allocation */
 
 extern int sysctl_cache_color_bits;
+extern int sysctl_cache_color_shift;
 
-extern int sysctl_dram_rank_bits;
 extern int sysctl_dram_bank_bits;
-
-extern int sysctl_dram_rank_shift;
 extern int sysctl_dram_bank_shift;
 
+extern int sysctl_dram_rank_bits;
+extern int sysctl_dram_rank_shift;
 #if USE_DRAM_AWARE
 #  define paddr_to_dram_rank(paddr) \
 	(((unsigned)(paddr) >> sysctl_dram_rank_shift) & ((1 << sysctl_dram_rank_bits) - 1))
 #  define paddr_to_dram_bank(paddr) \
 	(((unsigned)(paddr) >> sysctl_dram_bank_shift) & ((1 << sysctl_dram_bank_bits) - 1))
 #  define paddr_to_cache_color(paddr) \
-	(((unsigned)(paddr) >> PAGE_SHIFT) & ((1 << sysctl_cache_color_bits) - 1))
+	(((unsigned)(paddr) >> sysctl_cache_color_shift) & ((1 << sysctl_cache_color_bits) - 1))
 
 #  define dram_addr_to_color(rank, bank, color)	\
 	((rank << sysctl_dram_bank_bits | bank) << sysctl_cache_color_bits | color)
