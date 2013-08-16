@@ -1212,9 +1212,10 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		memdbg(2, "Weights: %d %d %d %d\n", rw, bw, cw, rw&&bw&&cw);
 	}
 
-	if (ph && (bitmap_weight(&ph->dram_rankmap, 1<<sysctl_dram_rank_bits) &&
-		   bitmap_weight(&ph->dram_bankmap, 1<<sysctl_dram_bank_bits) &&
-		   bitmap_weight(&ph->color_map, 1<<sysctl_cache_color_bits)))
+	if (ph &&
+	    (bitmap_weight(&ph->dram_rankmap, 1<<sysctl_dram_rank_bits) &&
+	     bitmap_weight(&ph->dram_bankmap, 1<<sysctl_dram_bank_bits) &&
+	     bitmap_weight(&ph->color_map, 1<<sysctl_cache_color_bits)))
 	{
 		int rank, bank, color;
 		use_color = 1;
@@ -1252,21 +1253,25 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		}
 		memdbg(2, "search lists in all orders\n");
 		/* search the entire list. make color cache in the process  */
-		for (current_order = 0; current_order < MAX_ORDER; ++current_order) {
+		for (current_order = 0; 
+		     current_order < MAX_ORDER; ++current_order) 
+		{
 			area = &(zone->free_area[current_order]);
 			if (list_empty(&area->free_list[migratetype]))
 				continue;
-			memdbg(3, " search order %d (nr_free=%ld, list[%d]=%ld)\n",
+			memdbg(3, " order=%d (nr_free=%ld, list[%d]=%ld)\n",
 			       current_order, area->nr_free, migratetype,
 			       list_count(&area->free_list[migratetype]));
-			list_for_each_safe(curr, tmp, &area->free_list[migratetype]) {
+			list_for_each_safe(curr, tmp, 
+					   &area->free_list[migratetype]) 
+			{
 				iters++;
 				page = list_entry(curr, struct page, lru);
 				ccache_insert(zone, page, current_order);
 				page = ccache_find_cmap(zone, cmap, c_stat);
 				if (page) {
 					update_stat(c_stat, page, iters);
-					memdbg(1, "Found colored page after scan 0x%lx\n",
+					memdbg(1, "Found colored pfn 0x%lx\n",
 					       page_to_pfn(page));
 					return page;
 				}
@@ -1282,11 +1287,14 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			update_stat(f_stat, page, iters);
 			return page;
 		}
-	} else {
+	} else { 
+		/* no color, or order > 1 */
 		int retries = 0;
 	retry:
 		/* Find a page of the appropriate size in the preferred list */
-		for (current_order = order; current_order < MAX_ORDER; ++current_order) {
+		for (current_order = order; 
+		     current_order < MAX_ORDER; ++current_order) 
+		{
 			area = &(zone->free_area[current_order]);
 			iters++;
 			if (list_empty(&area->free_list[migratetype]))
@@ -1304,7 +1312,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			list_del(&page->lru);
 			rmv_page_order(page);
 			area->nr_free--;
-			expand(zone, page, order, current_order, area, migratetype);
+			expand(zone, page, order, 
+			       current_order, area, migratetype);
 
 			return page;
 		}
@@ -1327,8 +1336,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		}
 	}
 	/* no memory (color or normal) found in this zone */
-	memdbg(1, "No memory(color+normal) in Zone %s: order %d mt %d in %lld ns\n",
-	       zone->name, order, migratetype, ktime_sub(ktime_get(), start).tv64);
+	memdbg(1, "No memory in Zone %s: order %d mt %d in %lld ns\n",
+	       zone->name, order, migratetype, 
+	       ktime_sub(ktime_get(), start).tv64);
 	return NULL;
 }
 #else /* !CONFIG_CGROUP_PHDUSA */
