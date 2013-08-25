@@ -1108,14 +1108,16 @@ static struct page *ccache_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	/* find color cache entry */
 	if (!bitmap_intersects(zone->color_bitmap, cmap, MAX_CACHE_BINS))
 		return NULL;
+
 	bitmap_and(tmpmask, zone->color_bitmap, cmap, MAX_CACHE_BINS);
-	
-	/*randomly find a bit among the candidates */
-        rand_seed = rand_seed % bitmap_weight(tmpmask, MAX_CACHE_BINS);
+
+	/* randomly find a bit among the candidates */
+        rand_seed = 0; /* rand_seed % bitmap_weight(tmpmask, MAX_CACHE_BINS); */
 	for_each_set_bit(c, tmpmask, MAX_CACHE_BINS) {
 		if (rand_seed-- <= 0) 
 			break;
 	}
+
 	BUG_ON(c >= MAX_CACHE_BINS);
 	BUG_ON(list_empty(&zone->color_list[c]));
 	
@@ -1207,10 +1209,6 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				1 << sysctl_cache_color_bits);
 		memdbg(4, "Weights(r/b/c): %d/%d/%d(%d)\n", rw, bw, cw, rw&&bw&&cw);
 
-		WARN_ONCE(!rw, "rank is not set");
-		WARN_ONCE(!bw, "bank is not set");
-		WARN_ONCE(!cw, "page color is not set");
-		
 		if (!rw) bitmap_fill(&ph->dram_rankmap, 1<<sysctl_dram_rank_bits);
 		if (!bw) bitmap_fill(&ph->dram_bankmap, 1<<sysctl_dram_bank_bits);
 		if (!cw) bitmap_fill(&ph->color_map, 1<<sysctl_cache_color_bits);
@@ -1288,14 +1286,14 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				continue;
 			page = list_entry(area->free_list[migratetype].next,
 					  struct page, lru);
-
-			update_stat(n_stat, page, iters);
 			
 			list_del(&page->lru);
 			rmv_page_order(page);
 			area->nr_free--;
 			expand(zone, page, order, 
 			       current_order, area, migratetype);
+
+			update_stat(n_stat, page, iters);
 			
 			return page;
 		}
