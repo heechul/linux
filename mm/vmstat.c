@@ -805,7 +805,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 	int order;
 #ifdef CONFIG_CGROUP_PHDUSA
 	int color, mt;
-	int cnt;
+	int cnt, bins;
 	struct free_area *area;
 	struct list_head *curr;
 
@@ -824,30 +824,18 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 	}
 	/* order by color */
 	seq_printf(m, "-------\n");
-	for (color = 0; color < MAX_CACHE_BINS; color++) {
-		seq_printf(m, "- %17s[%d]", "color", color);
-		for (order = 0; order < MAX_ORDER; order++) {
-			area = &(zone->free_area[order]);
-			cnt = 0;
-			for (mt = 0; mt < MIGRATE_ISOLATE; mt++) {
-				list_for_each(curr, &area->free_list[mt]) {
-					struct page *page;
-					int i;
-					/* high order page can match multiple colors */
-					page = list_entry(curr, struct page, lru);
-					for (i = 0; i < (1<<order); i++) {
-						int c, pfn;
-						c = page_to_color(&page[i]);
-						if (c == color) {
-							cnt++;
-							break;
-						}
-					}
-				}
-			}
-			seq_printf(m, "%6d ", cnt);
-		}
-		seq_printf(m, "\n");
+	bins = (1 << sysctl_dram_rank_bits) * 
+		(1 << sysctl_dram_bank_bits) *
+		(1 << sysctl_cache_color_bits);
+
+	for (color = 0; color < bins; color++) {
+		seq_printf(m, "- %s[%d:rank %d, bank %d]", "color", color,
+			   COLOR_TO_DRAM_RANK(color), 
+			   COLOR_TO_DRAM_BANK(color));
+		cnt = 0;
+		list_for_each(curr, &zone->color_list[color])
+			cnt++;
+		seq_printf(m, "%6d\n", cnt);
 	}
 #endif /* !CONFIG_CGROUP_PHDUSA */
 
