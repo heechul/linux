@@ -1100,7 +1100,7 @@ static struct page *ccache_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	struct page *page;
 	COLOR_BITMAP(tmpmask);
 	int c;
-	int rand_seed = (int)(stat->start.tv64);
+	int rand_seed = (unsigned int)(stat->start.tv64);
 
 	/* cache statistics */
 	if (stat) stat->cache_acc_cnt++;
@@ -1112,7 +1112,8 @@ static struct page *ccache_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	bitmap_and(tmpmask, zone->color_bitmap, cmap, MAX_CACHE_BINS);
 
 	/* randomly find a bit among the candidates */
-        rand_seed = 0; /* rand_seed % bitmap_weight(tmpmask, MAX_CACHE_BINS); */
+        rand_seed = rand_seed % bitmap_weight(tmpmask, MAX_CACHE_BINS);
+	memdbg(4, "rand_seed=%d\n", rand_seed);
 	for_each_set_bit(c, tmpmask, MAX_CACHE_BINS) {
 		if (rand_seed-- <= 0) 
 			break;
@@ -1252,9 +1253,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			area = &(zone->free_area[current_order]);
 			if (list_empty(&area->free_list[migratetype]))
 				continue;
-			memdbg(3, " order=%d (nr_free=%ld, list[%d]=%ld)\n",
-			       current_order, area->nr_free, migratetype,
-			       list_count(&area->free_list[migratetype]));
+			memdbg(3, " order=%d (nr_free=%ld)\n",
+			       current_order, area->nr_free);
 			list_for_each_safe(curr, tmp, 
 					   &area->free_list[migratetype]) 
 			{
