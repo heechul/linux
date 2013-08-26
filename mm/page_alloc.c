@@ -1100,7 +1100,7 @@ static struct page *ccache_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	struct page *page;
 	COLOR_BITMAP(tmpmask);
 	int c;
-	int rand_seed = (unsigned int)(stat->start.tv64);
+	int rand_seed = (int)((stat->start.tv64) & 0x7fffffff);
 
 	/* cache statistics */
 	if (stat) stat->cache_acc_cnt++;
@@ -1230,7 +1230,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		}
 	}
 #endif
-	if (migratetype == MIGRATE_MOVABLE && order == 0) {
+	if (/* migratetype == MIGRATE_MOVABLE && */ order == 0) {
 		/* check color cache */
 		iters++;
 		current_order = 0;
