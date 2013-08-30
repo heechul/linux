@@ -1196,6 +1196,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	if (memdbg_enable > 0)
 		c_stat->start = n_stat->start = f_stat->start = ktime_get();
 
+	if (memdbg_enable == 99)
+		goto normal_buddy_alloc;
+
 #if USE_DRAM_AWARE
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
@@ -1275,6 +1278,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		}
 		memdbg(2, "Failed to find a matching color\n");
 	} else {
+	normal_buddy_alloc:
 		/* normal buddy */
 		/* Find a page of the appropriate size in the preferred list */
 		for (current_order = order; 
