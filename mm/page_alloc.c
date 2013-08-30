@@ -1230,22 +1230,24 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		}
 	}
 #endif
-	if (/* migratetype == MIGRATE_MOVABLE && */ order == 0) {
-		/* check color cache */
-		iters++;
-		current_order = 0;
-		
-		memdbg(2, "check color cache (mt=%d)\n", migratetype);
+	page = NULL;
+
+	if (order == 0) {
 		/* find in the cache */
+		memdbg(2, "check color cache (mt=%d)\n", migratetype);
 		page = ccache_find_cmap(zone, cmap, c_stat);
-		
+
 		if (page) {
 			update_stat(c_stat, page, iters);
 			memdbg(1, "Found colored page in cache 0x%lx\n",
-				page_to_pfn(page));
+			       page_to_pfn(page));
 			return page;
 		}
-		memdbg(2, "search lists in all orders\n");
+	}
+
+	if (order == 0 && bitmap_weight(cmap, MAX_CACHE_BINS) != MAX_CACHE_BINS) {
+		/* build color cache */
+		iters++;
 		/* search the entire list. make color cache in the process  */
 		for (current_order = 0; 
 		     current_order < MAX_ORDER; ++current_order) 
@@ -1271,11 +1273,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				}
 			}
 		}
-		
-		memdbg(2, "Failed to find a matching color at %s, migratetype %d\n",
-		       zone->name, migratetype);
+		memdbg(2, "Failed to find a matching color\n");
 	} else {
-		/* !MOVABLE, or order > 1 */
+		/* normal buddy */
 		/* Find a page of the appropriate size in the preferred list */
 		for (current_order = order; 
 		     current_order < MAX_ORDER; ++current_order) 
