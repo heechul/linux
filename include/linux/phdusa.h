@@ -61,6 +61,7 @@ struct phdusa {
 	unsigned long dram_bankmap;
 	unsigned long dram_rankmap;
 #endif
+	COLOR_BITMAP(cmap);
 };
 
 /* Retrieve the phdusa group corresponding to this cgroup container */

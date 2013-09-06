@@ -1183,13 +1183,13 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	struct free_area *area;
 	struct list_head *curr, *tmp;
 	struct page *page;
-	COLOR_BITMAP(cmap);
 
 	struct phdusa *ph;
 	struct color_stat *c_stat = &color_page_alloc.stat[0];
 	struct color_stat *n_stat = &color_page_alloc.stat[1];
 	struct color_stat *f_stat = &color_page_alloc.stat[2];
 	int iters = 0;
+	COLOR_BITMAP(cmap);
 
 	bitmap_fill(cmap, MAX_CACHE_BINS);
 
@@ -1202,39 +1202,10 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 #if USE_DRAM_AWARE
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
-
-	if (ph) {
-		int rank, bank, color;
-		int rw = bitmap_weight(&ph->dram_rankmap,
-				1 << sysctl_dram_rank_bits);
-		int bw = bitmap_weight(&ph->dram_bankmap,
-				1 << sysctl_dram_bank_bits);
-		int cw = bitmap_weight(&ph->color_map,
-				1 << sysctl_cache_color_bits);
-		memdbg(4, "Weights(r/b/c): %d/%d/%d(%d)\n", rw, bw, cw, rw&&bw&&cw);
-
-		if (!rw) bitmap_fill(&ph->dram_rankmap, 1<<sysctl_dram_rank_bits);
-		if (!bw) bitmap_fill(&ph->dram_bankmap, 1<<sysctl_dram_bank_bits);
-		if (!cw) bitmap_fill(&ph->color_map, 1<<sysctl_cache_color_bits);
-
-		bitmap_zero(cmap, MAX_CACHE_BINS);
-		for_each_set_bit(rank, &ph->dram_rankmap,
-				 1<<sysctl_dram_rank_bits) {
-			for_each_set_bit(bank, &ph->dram_bankmap,
-					 1<<sysctl_dram_bank_bits) {
-				for_each_set_bit(color, &ph->color_map,
-						 1<<sysctl_cache_color_bits) {
-					bitmap_set(cmap,
-						   dram_addr_to_color(
-							   rank, bank, color),
-						   1);
-				}
-			}
-		}
-	}
+	if (ph && bitmap_weight(ph->cmap, MAX_CACHE_BINS) > 0)
+		bitmap_copy(cmap, ph->cmap, MAX_CACHE_BINS);
 #endif
 	page = NULL;
-
 	if (order == 0) {
 		/* find in the cache */
 		memdbg(2, "check color cache (mt=%d)\n", migratetype);
@@ -1248,7 +1219,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		}
 	}
 
-	if (order == 0 && bitmap_weight(cmap, MAX_CACHE_BINS) != MAX_CACHE_BINS) {
+	if (order == 0) {
 		/* build color cache */
 		iters++;
 		/* search the entire list. make color cache in the process  */
@@ -1269,9 +1240,10 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				page = ccache_find_cmap(zone, cmap, c_stat);
 				if (page) {
 					update_stat(c_stat, page, iters);
-					memdbg(1, "Found at Zone %s pfn 0x%lx\n",
+					memdbg(1, "Found at Zone %s pfn 0x%lx w:%d\n",
 					       zone->name,
-					       page_to_pfn(page));
+					       page_to_pfn(page), 
+					       bitmap_weight(cmap, MAX_CACHE_BINS));
 					return page;
 				}
 			}

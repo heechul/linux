@@ -74,6 +74,7 @@ static int phdusa_file_write(struct cgroup *cgrp, struct cftype *cft,
 {
 	int retval = 0;
 	struct phdusa *ph = cgroup_ph(cgrp);
+	int bank, rank, color;
 
 	if (!cgroup_lock_live_group(cgrp))
 		return -ENODEV;
@@ -97,6 +98,23 @@ static int phdusa_file_write(struct cgroup *cgrp, struct cftype *cft,
 		break;
 	}
 
+	/* repopulate the bin map */
+
+	bitmap_zero(ph->cmap, MAX_CACHE_BINS);
+	for_each_set_bit(rank, &ph->dram_rankmap,
+			 1<<sysctl_dram_rank_bits) {
+		for_each_set_bit(bank, &ph->dram_bankmap,
+				 1<<sysctl_dram_bank_bits) {
+			for_each_set_bit(color, &ph->color_map,
+					 1<<sysctl_cache_color_bits) {
+				bitmap_set(ph->cmap,
+					   dram_addr_to_color(
+						   rank, bank, color),
+					   1);
+			}
+		}
+	}
+	
 	cgroup_unlock();
 	return retval;
 }
@@ -200,6 +218,7 @@ static struct cgroup_subsys_state *phdusa_create(struct cgroup *cgrp)
 	bitmap_clear(&ph_child->dram_rankmap, 0, 1<<sysctl_dram_rank_bits);
 	bitmap_clear(&ph_child->dram_bankmap, 0, 1<<sysctl_dram_bank_bits);
 #endif
+	bitmap_clear(ph_child->cmap, 0, MAX_CACHE_BINS);
 	return &ph_child->css;
 }
 
