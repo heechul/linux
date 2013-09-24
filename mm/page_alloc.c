@@ -105,7 +105,6 @@ static struct {
 	struct color_stat stat[3]; /* 0 - color, 1 - normal, 2 - fail */
 } color_page_alloc;
 
-
 static void ccache_flush(struct zone *zone);
 
 static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf,
@@ -1053,7 +1052,8 @@ static void ccache_flush(struct zone *zone)
 				page = list_entry(zone->color_list[c].next, 
 						  struct page, lru);
 				list_del_init(&page->lru);
-				__free_one_page(page, zone, 0, MIGRATE_MOVABLE);
+				/* FIXME: MIGRATE_UNMOVABLE? */
+				__free_one_page(page, zone, 0, MIGRATE_MOVABLE); 
 				zone->free_area[0].nr_free--;
 			}
 
@@ -1100,7 +1100,8 @@ static struct page *ccache_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	struct page *page;
 	COLOR_BITMAP(tmpmask);
 	int c;
-	int rand_seed = (int)((stat->start.tv64) & 0x7fffffff);
+	static unsigned int rand_seed = 0;
+	unsigned int tmp_idx;
 
 	/* cache statistics */
 	if (stat) stat->cache_acc_cnt++;
@@ -1111,11 +1112,12 @@ static struct page *ccache_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 
 	bitmap_and(tmpmask, zone->color_bitmap, cmap, MAX_CACHE_BINS);
 
-	/* randomly find a bit among the candidates */
-        rand_seed = rand_seed % bitmap_weight(tmpmask, MAX_CACHE_BINS);
-	memdbg(4, "rand_seed=%d\n", rand_seed);
+	/* choose a bit among the candidates */
+	rand_seed ++; /* essentially bank,rank interleaving */
+        tmp_idx = rand_seed % bitmap_weight(tmpmask, MAX_CACHE_BINS);
+
 	for_each_set_bit(c, tmpmask, MAX_CACHE_BINS) {
-		if (rand_seed-- <= 0) 
+		if (tmp_idx-- <= 0) 
 			break;
 	}
 
@@ -1189,9 +1191,8 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	struct color_stat *n_stat = &color_page_alloc.stat[1];
 	struct color_stat *f_stat = &color_page_alloc.stat[2];
 	int iters = 0;
-	COLOR_BITMAP(cmap);
-
-	bitmap_fill(cmap, MAX_CACHE_BINS);
+	COLOR_BITMAP(tmpcmap);
+	unsigned long *cmap;
 
 	if (memdbg_enable > 0)
 		c_stat->start = n_stat->start = f_stat->start = ktime_get();
@@ -1199,12 +1200,17 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	if (memdbg_enable == 99)
 		goto normal_buddy_alloc;
 
-#if USE_DRAM_AWARE
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phdusa_subsys_id]);
 	if (ph && bitmap_weight(ph->cmap, MAX_CACHE_BINS) > 0)
-		bitmap_copy(cmap, ph->cmap, MAX_CACHE_BINS);
-#endif
+		cmap = ph->cmap;
+	else {
+		bitmap_fill(tmpcmap, MAX_CACHE_BINS);
+		cmap = tmpcmap;
+	}
+
+	memdbg(3, "cmap: 0x%08x (addr): 0x%08x (value)\n", cmap, *cmap);
+
 	page = NULL;
 	if (order == 0) {
 		/* find in the cache */
