@@ -69,6 +69,7 @@
 int memdbg_enable = 0;
 EXPORT_SYMBOL(memdbg_enable);
 
+int sysctl_alloc_balance = 0;
 int sysctl_cache_color_shift = PAGE_SHIFT;
 int sysctl_cache_color_bits = DEFAULT_COLOR_BITS;
 #if USE_DRAM_AWARE
@@ -96,6 +97,9 @@ struct color_stat {
 	s64 cache_acc_cnt;
 
 	s64 flush_cnt;
+
+	s64 alloc_balance;
+	s64 alloc_balance_timeout;
 	ktime_t start;     /* start time of the current iteration */
 };
 
@@ -134,6 +138,7 @@ static ssize_t color_page_alloc_write(struct file *filp, const char __user *ubuf
 			spin_unlock_irqrestore(&zone->lock, flags);
 		}
 	}
+
         *ppos += cnt;
         return cnt;
 }
@@ -159,6 +164,9 @@ static int color_page_alloc_show(struct seq_file *m, void *v)
 			   div64_u64(stat->iter_cnt, stat->tot_cnt) : 0,
 			   stat->iter_cnt, stat->tot_cnt);
 		seq_printf(m, "  flush cnt: %lld\n", stat->flush_cnt);
+
+		seq_printf(m, "  balance: %lld | fail: %lld\n", 
+			   stat->alloc_balance, stat->alloc_balance_timeout);
 	}
 
 	seq_printf(m, "Cache colors: %d\n", 1 << sysctl_cache_color_bits);
@@ -209,6 +217,8 @@ static int __init color_page_alloc_debugfs(void)
 	if (!debugfs_create_u32("dram_rank_shift", mode, dir, &sysctl_dram_rank_shift))
 		goto fail;
 	if (!debugfs_create_u32("dram_rank_bits", mode, dir, &sysctl_dram_rank_bits))
+		goto fail;
+	if (!debugfs_create_u32("alloc_balance", mode, dir, &sysctl_alloc_balance))
 		goto fail;
 #endif /* USE_DRAM_AWARE */
 	if (!debugfs_create_u32("cache_color_shift", mode, dir, &sysctl_cache_color_shift))
@@ -1095,13 +1105,15 @@ static void ccache_insert(struct zone *zone, struct page *page, int order)
 
 /* return a colored page (order-0) and remove it from the colored cache */
 static struct page *ccache_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
-			      struct color_stat *stat)
+				     int order,
+				     struct color_stat *stat)
 {
 	struct page *page;
 	COLOR_BITMAP(tmpmask);
 	int c;
 	static unsigned int rand_seed = 0;
 	unsigned int tmp_idx;
+	int found_w, want_w;
 
 	/* cache statistics */
 	if (stat) stat->cache_acc_cnt++;
@@ -1112,9 +1124,29 @@ static struct page *ccache_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 
 	bitmap_and(tmpmask, zone->color_bitmap, cmap, MAX_CACHE_BINS);
 
+	/* must have a balance. */
+	found_w = bitmap_weight(tmpmask, MAX_CACHE_BINS);
+	want_w  = bitmap_weight(cmap, MAX_CACHE_BINS);
+	if (sysctl_alloc_balance && 
+	    found_w < want_w && 
+	    found_w <= sysctl_alloc_balance &&
+	    memdbg_enable)
+	{
+		ktime_t dur = ktime_sub(ktime_get(), stat->start);
+		if (dur.tv64 < 1000000) {
+			/* try to balance unless order=MAX-2 or 1ms has passed */
+			memdbg(4, "found_w=%d want_w=%d order=%d elapsed=%lld ns\n",
+			       found_w, want_w, order, dur.tv64);
+			stat->alloc_balance++;
+
+			return NULL;
+		}
+		stat->alloc_balance_timeout++;
+	}
+
 	/* choose a bit among the candidates */
 	rand_seed ++; /* essentially bank,rank interleaving */
-        tmp_idx = rand_seed % bitmap_weight(tmpmask, MAX_CACHE_BINS);
+        tmp_idx = rand_seed % found_w;
 
 	for_each_set_bit(c, tmpmask, MAX_CACHE_BINS) {
 		if (tmp_idx-- <= 0) 
@@ -1194,7 +1226,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	COLOR_BITMAP(tmpcmap);
 	unsigned long *cmap;
 
-	if (memdbg_enable > 0)
+	if (memdbg_enable) 
 		c_stat->start = n_stat->start = f_stat->start = ktime_get();
 
 	if (memdbg_enable == 99)
@@ -1209,13 +1241,11 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		cmap = tmpcmap;
 	}
 
-	memdbg(3, "cmap: 0x%08x (addr): 0x%08x (value)\n", cmap, *cmap);
-
 	page = NULL;
 	if (order == 0) {
 		/* find in the cache */
 		memdbg(2, "check color cache (mt=%d)\n", migratetype);
-		page = ccache_find_cmap(zone, cmap, c_stat);
+		page = ccache_find_cmap(zone, cmap, 0, c_stat);
 
 		if (page) {
 			update_stat(c_stat, page, iters);
@@ -1243,7 +1273,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 				iters++;
 				page = list_entry(curr, struct page, lru);
 				ccache_insert(zone, page, current_order);
-				page = ccache_find_cmap(zone, cmap, c_stat);
+				page = ccache_find_cmap(zone, cmap, current_order, c_stat);
 				if (page) {
 					update_stat(c_stat, page, iters);
 					memdbg(1, "Found at Zone %s pfn 0x%lx w:%d\n",
