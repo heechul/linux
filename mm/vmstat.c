@@ -20,7 +20,7 @@
 #include <linux/writeback.h>
 #include <linux/compaction.h>
 
-#include <linux/phdusa.h>
+#include <linux/phalloc.h>
 
 #ifdef CONFIG_VM_EVENT_COUNTERS
 DEFINE_PER_CPU(struct vm_event_state, vm_event_states) = {{0}};
@@ -803,7 +803,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 						struct zone *zone)
 {
 	int order;
-#ifdef CONFIG_CGROUP_PHDUSA
+#ifdef CONFIG_CGROUP_PHALLOC
 	int color, mt;
 	int cnt, bins;
 	struct free_area *area;
@@ -837,7 +837,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 			cnt++;
 		seq_printf(m, "%6d\n", cnt);
 	}
-#endif /* !CONFIG_CGROUP_PHDUSA */
+#endif /* !CONFIG_CGROUP_PHALLOC */
 
 	seq_printf(m, "Node %d, zone %8s ", pgdat->node_id, zone->name);
 	for (order = 0; order < MAX_ORDER; ++order)

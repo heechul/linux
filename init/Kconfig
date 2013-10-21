@@ -790,15 +790,6 @@ config FAIR_GROUP_SCHED
 	depends on CGROUP_SCHED
 	default CGROUP_SCHED
 
-config SCHED_EVENT_THROTTLE
-       bool "resource provisioning for FAIR_GROUP_SCHED"
-       depends on FAIR_GROUP_SCHED
-       default n
-       help
-         This option allows user to define resource provisioning (limits), 
-         using hardware performance counters, for tasks running within CFS 
-         or rt group schedulers.
-
 config CFS_BANDWIDTH
 	bool "CPU bandwidth provisioning for FAIR_GROUP_SCHED"
 	depends on EXPERIMENTAL
@@ -855,11 +846,11 @@ config DEBUG_BLK_CGROUP
 	Enable some debugging help. Currently it exports additional stat
 	files in a cgroup which can be useful for debugging.
 
-config CGROUP_PHDUSA
-	bool "Enable Physical Driven User Space Allocator"
+config CGROUP_PHALLOC
+	bool "Enable PHALLOC"
 	help
-	  Enables PhDUSA, a low-level physical page allocator that gives
-	  user control over the physical pages allocated to a process.
+	  Enables PHALLOC: physical address based page allocator that 
+	  replaces the buddy allocator.
 
 endif # CGROUPS
 

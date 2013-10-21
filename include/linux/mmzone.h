@@ -69,7 +69,7 @@ enum {
 #  define cma_wmark_pages(zone) 0
 #endif
 
-#ifdef CONFIG_CGROUP_PHDUSA
+#ifdef CONFIG_CGROUP_PHALLOC
 #  define DEFAULT_COLOR_BITS 3
 #  define DEFAULT_BANK_BITS 3
 #  define DEFAULT_RANK_BITS 2
@@ -396,7 +396,7 @@ struct zone {
 #endif
 	struct free_area	free_area[MAX_ORDER];
 
-#ifdef CONFIG_CGROUP_PHDUSA
+#ifdef CONFIG_CGROUP_PHALLOC
 	/*
 	 * Color page cache. for movable type free pages of order-0
 	 */

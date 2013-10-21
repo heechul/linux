@@ -78,3 +78,7 @@ SUBSYS(hugetlb)
 #endif
 
 /* */
+
+#ifdef CONFIG_CGROUP_PHALLOC
+SUBSYS(phalloc)
+#endif

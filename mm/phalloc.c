@@ -1,5 +1,5 @@
 /*
- * kernel/phdusa.c
+ * kernel/phalloc.c
  *
  * Physical driven User Space Allocator info for a set of tasks.
  */
@@ -8,7 +8,7 @@
 #include <linux/cgroup.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/phdusa.h>
+#include <linux/phalloc.h>
 #include <linux/mm.h>
 #include <linux/err.h>
 #include <linux/fs.h>
@@ -18,11 +18,11 @@
 /*
  * Check if a page is compliant to the policy defined for the given vma
  */
-#ifdef CONFIG_CGROUP_PHDUSA
+#ifdef CONFIG_CGROUP_PHALLOC
 
 #define MAX_LINE_LEN (6*128)
 /*
- * Types of files in a phdusa group
+ * Types of files in a phalloc group
  * FILE_COLORS - contain list of colors allowed
  * FILE_PROFILE - contains the profile information for the task
 */
@@ -32,29 +32,29 @@ typedef enum {
 	FILE_DRAM_BANK,
 #endif
 	FILE_COLORS,
-} phdusa_filetype_t;
+} phalloc_filetype_t;
 
 /*
- * Top level phdusa - mask initialized to zero implying no restriction on
+ * Top level phalloc - mask initialized to zero implying no restriction on
  * physical pages
 */
 
-static struct phdusa top_phdusa;
+static struct phalloc top_phalloc;
 
-/* Retrieve the phdusa group corresponding to this cgroup container */
-struct phdusa *cgroup_ph(struct cgroup *cgrp)
+/* Retrieve the phalloc group corresponding to this cgroup container */
+struct phalloc *cgroup_ph(struct cgroup *cgrp)
 {
-	return container_of(cgroup_subsys_state(cgrp, phdusa_subsys_id),
-			    struct phdusa, css);
+	return container_of(cgroup_subsys_state(cgrp, phalloc_subsys_id),
+			    struct phalloc, css);
 }
 
-struct phdusa * ph_from_subsys(struct cgroup_subsys_state * subsys)
+struct phalloc * ph_from_subsys(struct cgroup_subsys_state * subsys)
 {
-	return container_of(subsys, struct phdusa, css);
+	return container_of(subsys, struct phalloc, css);
 }
 
 /*
- * Common write function for files in phdusa cgroup
+ * Common write function for files in phalloc cgroup
  */
 static int update_bitmask(unsigned long *bitmap, const char *buf, int maxbits)
 {
@@ -69,11 +69,11 @@ static int update_bitmask(unsigned long *bitmap, const char *buf, int maxbits)
 }
 
 
-static int phdusa_file_write(struct cgroup *cgrp, struct cftype *cft,
+static int phalloc_file_write(struct cgroup *cgrp, struct cftype *cft,
 			     const char *buf)
 {
 	int retval = 0;
-	struct phdusa *ph = cgroup_ph(cgrp);
+	struct phalloc *ph = cgroup_ph(cgrp);
 	int bank, rank, color;
 
 	if (!cgroup_lock_live_group(cgrp))
@@ -119,13 +119,13 @@ static int phdusa_file_write(struct cgroup *cgrp, struct cftype *cft,
 	return retval;
 }
 
-static ssize_t phdusa_file_read(struct cgroup *cgrp,
+static ssize_t phalloc_file_read(struct cgroup *cgrp,
 				struct cftype *cft,
 				struct file *file,
 				char __user *buf,
 				size_t nbytes, loff_t *ppos)
 {
-	struct phdusa *ph = cgroup_ph(cgrp);
+	struct phalloc *ph = cgroup_ph(cgrp);
 	char *page;
 	ssize_t retval = 0;
 	char *s;
@@ -171,23 +171,23 @@ static struct cftype files[] = {
 #if USE_DRAM_AWARE
 	{
 		.name = "dram_rank",
-		.read = phdusa_file_read,
-		.write_string = phdusa_file_write,
+		.read = phalloc_file_read,
+		.write_string = phalloc_file_write,
 		.max_write_len = MAX_LINE_LEN,
 		.private = FILE_DRAM_RANK,
 	},
 	{
 		.name = "dram_bank",
-		.read = phdusa_file_read,
-		.write_string = phdusa_file_write,
+		.read = phalloc_file_read,
+		.write_string = phalloc_file_write,
 		.max_write_len = MAX_LINE_LEN,
 		.private = FILE_DRAM_BANK,
 	},
 #endif
 	{
 		.name = "colors",
-		.read = phdusa_file_read,
-		.write_string = phdusa_file_write,
+		.read = phalloc_file_read,
+		.write_string = phalloc_file_write,
 		.max_write_len = MAX_LINE_LEN,
 		.private = FILE_COLORS,
 	},
@@ -195,21 +195,21 @@ static struct cftype files[] = {
 };
 
 /*
- * phdusa_create - create a phdusa group
+ * phalloc_create - create a phalloc group
  */
-static struct cgroup_subsys_state *phdusa_create(struct cgroup *cgrp)
+static struct cgroup_subsys_state *phalloc_create(struct cgroup *cgrp)
 {
-	struct phdusa * ph_child;
-	struct phdusa * ph_parent;
+	struct phalloc * ph_child;
+	struct phalloc * ph_parent;
 
 	printk(KERN_INFO "Creating the new cgroup - %p\n", cgrp);
 
 	if (!cgrp->parent) {
-		return &top_phdusa.css;
+		return &top_phalloc.css;
 	}
 	ph_parent = cgroup_ph(cgrp->parent);
 
-	ph_child = kmalloc(sizeof(struct phdusa), GFP_KERNEL);
+	ph_child = kmalloc(sizeof(struct phalloc), GFP_KERNEL);
 	if(!ph_child)
 		return ERR_PTR(-ENOMEM);
 
@@ -224,21 +224,21 @@ static struct cgroup_subsys_state *phdusa_create(struct cgroup *cgrp)
 
 
 /*
- * Destroy an existing phdusa group
+ * Destroy an existing phalloc group
  */
-static void phdusa_destroy(struct cgroup *cgrp)
+static void phalloc_destroy(struct cgroup *cgrp)
 {
-	struct phdusa *ph = cgroup_ph(cgrp);
+	struct phalloc *ph = cgroup_ph(cgrp);
 	printk(KERN_INFO "Deleting the cgroup - %p\n",cgrp);
 	kfree(ph);
 }
 
-struct cgroup_subsys phdusa_subsys = {
-	.name = "phdusa",
-	.create = phdusa_create,
-	.destroy = phdusa_destroy,
-	.subsys_id = phdusa_subsys_id,
+struct cgroup_subsys phalloc_subsys = {
+	.name = "phalloc",
+	.create = phalloc_create,
+	.destroy = phalloc_destroy,
+	.subsys_id = phalloc_subsys_id,
 	.base_cftypes = files,
 };
 
-#endif /* CONFIG_CGROUP_PHDUSA */
+#endif /* CONFIG_CGROUP_PHALLOC */

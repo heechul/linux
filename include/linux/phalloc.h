@@ -1,8 +1,8 @@
-#ifndef _LINUX_PHDUSA_H
-#define _LINUX_PHDUSA_H
+#ifndef _LINUX_PHALLOC_H
+#define _LINUX_PHALLOC_H
 
 /*
- * kernel/phdusa.h
+ * kernel/phalloc.h
  *
  * cache color and DRAM aware page allocator
  */
@@ -12,7 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 
-#ifdef CONFIG_CGROUP_PHDUSA
+#ifdef CONFIG_CGROUP_PHALLOC
 
 #define USE_DRAM_AWARE 1 /* heechul for dram aware allocation */
 
@@ -54,7 +54,7 @@ extern int sysctl_dram_rank_shift;
 /* #  define page_to_color(page) (page_to_pfn(page) % (1<<sysctl_cache_color_bits)) */
 #endif
 
-struct phdusa {
+struct phalloc {
 	struct cgroup_subsys_state css;
 	unsigned long color_map; /* allowed color bitmap.  */
 #if USE_DRAM_AWARE
@@ -64,12 +64,12 @@ struct phdusa {
 	COLOR_BITMAP(cmap);
 };
 
-/* Retrieve the phdusa group corresponding to this cgroup container */
-struct phdusa *cgroup_ph(struct cgroup *cgrp);
+/* Retrieve the phalloc group corresponding to this cgroup container */
+struct phalloc *cgroup_ph(struct cgroup *cgrp);
 
-/* Retrieve the phdusa group corresponding to this subsys */
-struct phdusa * ph_from_subsys(struct cgroup_subsys_state * subsys);
+/* Retrieve the phalloc group corresponding to this subsys */
+struct phalloc * ph_from_subsys(struct cgroup_subsys_state * subsys);
 
-#endif /* CONFIG_CGROUP_PHDUSA */
+#endif /* CONFIG_CGROUP_PHALLOC */
 
-#endif /* _LINUX_PHDUSA_H */
+#endif /* _LINUX_PHALLOC_H */
