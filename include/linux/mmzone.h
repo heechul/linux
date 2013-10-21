@@ -69,6 +69,17 @@ enum {
 #  define cma_wmark_pages(zone) 0
 #endif
 
+#ifdef CONFIG_CGROUP_PHDUSA
+#  define DEFAULT_COLOR_BITS 3
+#  define DEFAULT_BANK_BITS 3
+#  define DEFAULT_RANK_BITS 2
+/* Determine the number of bins according to the bits required for
+   each component of the address*/
+#  define BINS_BITMASK_ORDER (DEFAULT_COLOR_BITS + DEFAULT_BANK_BITS + DEFAULT_RANK_BITS)
+#  define MAX_CACHE_BINS (1 << BINS_BITMASK_ORDER )
+#  define COLOR_BITMAP(name) DECLARE_BITMAP(name, MAX_CACHE_BINS)
+#endif
+
 #define for_each_migratetype_order(order, type) \
 	for (order = 0; order < MAX_ORDER; order++) \
 		for (type = 0; type < MIGRATE_TYPES; type++)
@@ -384,6 +395,14 @@ struct zone {
 	unsigned long		min_cma_pages;
 #endif
 	struct free_area	free_area[MAX_ORDER];
+
+#ifdef CONFIG_CGROUP_PHDUSA
+	/*
+	 * Color page cache. for movable type free pages of order-0
+	 */
+	struct list_head        color_list[MAX_CACHE_BINS];
+	COLOR_BITMAP(color_bitmap);
+#endif
 
 #ifndef CONFIG_SPARSEMEM
 	/*
