@@ -71,14 +71,9 @@ int memdbg_enable = 0;
 EXPORT_SYMBOL(memdbg_enable);
 
 int sysctl_alloc_balance = 0;
-int sysctl_cache_color_shift = PAGE_SHIFT;
-int sysctl_cache_color_bits = DEFAULT_COLOR_BITS;
-#if USE_DRAM_AWARE
-int sysctl_dram_bank_shift = 13;
-int sysctl_dram_bank_bits = DEFAULT_BANK_BITS;
-int sysctl_dram_rank_shift = 16;
-int sysctl_dram_rank_bits = DEFAULT_RANK_BITS;
-#endif /* USE_DRAM_AWARE */
+
+/* phalloc address bitmask */
+unsigned long sysctl_phalloc_mask = 0x0;
 
 #define memdbg(lvl, fmt, ...)					\
         do {                                                    \
@@ -146,8 +141,9 @@ static ssize_t phalloc_write(struct file *filp, const char __user *ubuf,
 
 static int phalloc_show(struct seq_file *m, void *v)
 {
-	int i;
+	int i, tmp;
 	char *desc[] = { "Color", "Normal", "Fail" };
+	char buf[256];
 	for (i = 0; i < 3; i++) {
 		struct phalloc_stat *stat = &phalloc.stat[i];
 		seq_printf(m, "statistics %s:\n", desc[i]);
@@ -159,7 +155,7 @@ static int phalloc_show(struct seq_file *m, void *v)
 		seq_printf(m, "  hit rate: %lld/%lld (%lld %%)\n",
 			   stat->cache_hit_cnt, stat->cache_acc_cnt,
 			   (stat->cache_acc_cnt) ?
-			   div64_u64(stat->cache_hit_cnt * 100, stat->cache_acc_cnt) : 0);
+			   div64_u64(stat->cache_hit_cnt*100, stat->cache_acc_cnt) : 0);
 		seq_printf(m, "  avg iter: %lld (%lld/%lld)\n",
 			   (stat->tot_cnt) ?
 			   div64_u64(stat->iter_cnt, stat->tot_cnt) : 0,
@@ -169,12 +165,11 @@ static int phalloc_show(struct seq_file *m, void *v)
 		seq_printf(m, "  balance: %lld | fail: %lld\n", 
 			   stat->alloc_balance, stat->alloc_balance_timeout);
 	}
-
-	seq_printf(m, "Cache colors: %d\n", 1 << sysctl_cache_color_bits);
-#if USE_DRAM_AWARE
-	seq_printf(m, "DRAM ranks: %d\n", 1 << sysctl_dram_rank_bits);
-	seq_printf(m, "DRAM banks: %d\n", 1 << sysctl_dram_bank_bits);
-#endif
+	seq_printf(m, "mask: 0x%lx\n", sysctl_phalloc_mask);
+	tmp = bitmap_weight(&sysctl_phalloc_mask, sizeof(unsigned long)*8);
+	seq_printf(m, "weight: %d  (bins: %d)\n", tmp, 1<<tmp);
+	bitmap_scnlistprintf(buf, 256, &sysctl_phalloc_mask, sizeof(unsigned long)*8);
+	seq_printf(m, "bits: %s\n", buf);
         return 0;
 }
 static int phalloc_open(struct inode *inode, struct file *filp)
@@ -208,23 +203,11 @@ static int __init phalloc_debugfs(void)
                 return PTR_ERR(dir);
         if (!debugfs_create_file("control", mode, dir, NULL, &phalloc_fops))
                 goto fail;
+	if (!debugfs_create_u64("phalloc_mask", mode, dir, (u64 *)&sysctl_phalloc_mask))
+		goto fail;
         if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
                 goto fail;
-#if USE_DRAM_AWARE
-	if (!debugfs_create_u32("dram_bank_shift", mode, dir, &sysctl_dram_bank_shift))
-		goto fail;
-	if (!debugfs_create_u32("dram_bank_bits", mode, dir, &sysctl_dram_bank_bits))
-		goto fail;
-	if (!debugfs_create_u32("dram_rank_shift", mode, dir, &sysctl_dram_rank_shift))
-		goto fail;
-	if (!debugfs_create_u32("dram_rank_bits", mode, dir, &sysctl_dram_rank_bits))
-		goto fail;
 	if (!debugfs_create_u32("alloc_balance", mode, dir, &sysctl_alloc_balance))
-		goto fail;
-#endif /* USE_DRAM_AWARE */
-	if (!debugfs_create_u32("cache_color_shift", mode, dir, &sysctl_cache_color_shift))
-		goto fail;
-	if (!debugfs_create_u32("cache_color_bits", mode, dir, &sysctl_cache_color_bits))
 		goto fail;
         return 0;
 fail:
@@ -1037,6 +1020,25 @@ static int prep_new_page(struct page *page, int order, gfp_t gfp_flags)
 
 #ifdef CONFIG_CGROUP_PHALLOC
 
+int phalloc_bins(void)
+{
+	return min((1 << bitmap_weight(&sysctl_phalloc_mask, 8*sizeof (unsigned long))),
+		   MAX_PHALLOC_BINS);
+}
+
+static inline int page_to_color(struct page *page)
+{
+	int color = 0;
+	int idx = 0;
+	int c;
+	unsigned long paddr = page_to_phys(page);
+	for_each_set_bit(c, &sysctl_phalloc_mask, sizeof(unsigned long) * 8)  {
+		if ((unsigned long)paddr & (1<<c))
+			color |= (1<<idx);
+		idx++;
+	}
+	return color;
+}
 
 /* debug */
 static inline unsigned long list_count(struct list_head *head)
@@ -1058,7 +1060,7 @@ static void phalloc_flush(struct zone *zone)
 	memdbg(2, "flush the ccache for zone %s\n", zone->name);
 
 	while (1) {
-		for (c = 0; c < MAX_CACHE_BINS; c++) {
+		for (c = 0; c < MAX_PHALLOC_BINS; c++) {
 			if (!list_empty(&zone->color_list[c])) {
 				page = list_entry(zone->color_list[c].next, 
 						  struct page, lru);
@@ -1074,7 +1076,7 @@ static void phalloc_flush(struct zone *zone)
 			}
 		}
 
-		if (bitmap_weight(zone->color_bitmap, MAX_CACHE_BINS) == 0)
+		if (bitmap_weight(zone->color_bitmap, MAX_PHALLOC_BINS) == 0)
 			break;
 	}
 }
@@ -1120,14 +1122,14 @@ static struct page *phalloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	if (stat) stat->cache_acc_cnt++;
 	
 	/* find color cache entry */
-	if (!bitmap_intersects(zone->color_bitmap, cmap, MAX_CACHE_BINS))
+	if (!bitmap_intersects(zone->color_bitmap, cmap, MAX_PHALLOC_BINS))
 		return NULL;
 
-	bitmap_and(tmpmask, zone->color_bitmap, cmap, MAX_CACHE_BINS);
+	bitmap_and(tmpmask, zone->color_bitmap, cmap, MAX_PHALLOC_BINS);
 
 	/* must have a balance. */
-	found_w = bitmap_weight(tmpmask, MAX_CACHE_BINS);
-	want_w  = bitmap_weight(cmap, MAX_CACHE_BINS);
+	found_w = bitmap_weight(tmpmask, MAX_PHALLOC_BINS);
+	want_w  = bitmap_weight(cmap, MAX_PHALLOC_BINS);
 	if (sysctl_alloc_balance && 
 	    found_w < want_w && 
 	    found_w <= sysctl_alloc_balance &&
@@ -1149,24 +1151,18 @@ static struct page *phalloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	rand_seed ++; /* essentially bank,rank interleaving */
         tmp_idx = rand_seed % found_w;
 
-	for_each_set_bit(c, tmpmask, MAX_CACHE_BINS) {
+	for_each_set_bit(c, tmpmask, MAX_PHALLOC_BINS) {
 		if (tmp_idx-- <= 0) 
 			break;
 	}
 
-	BUG_ON(c >= MAX_CACHE_BINS);
+	BUG_ON(c >= MAX_PHALLOC_BINS);
 	BUG_ON(list_empty(&zone->color_list[c]));
 	
 	page = list_entry(zone->color_list[c].next, struct page, lru);
 	
-#if USE_DRAM_AWARE
-	memdbg(4, "found pfn %ld(0x%08llx)(color=%d,rank=%d,bank=%d,zone=%s)\n", 
-	       page_to_pfn(page), (u64)page_to_phys(page),
-	       c, COLOR_TO_DRAM_RANK(c), COLOR_TO_DRAM_BANK(c), zone->name);
-#else
-	memdbg(4, "found pfn %ld (color=%d,zone=%s)\n", 
+	memdbg(4, "found pfn %ld (color=%d,zone=%s)\n",
 	       page_to_pfn(page), c, zone->name);
-#endif
 	BUG_ON(page_to_color(page) != c);
 
 	/* remove from the zone->color_list[color] */
@@ -1235,10 +1231,10 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[phalloc_subsys_id]);
-	if (ph && bitmap_weight(ph->cmap, MAX_CACHE_BINS) > 0)
+	if (ph && bitmap_weight(ph->cmap, MAX_PHALLOC_BINS) > 0)
 		cmap = ph->cmap;
 	else {
-		bitmap_fill(tmpcmap, MAX_CACHE_BINS);
+		bitmap_fill(tmpcmap, MAX_PHALLOC_BINS);
 		cmap = tmpcmap;
 	}
 
@@ -1280,7 +1276,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 					memdbg(1, "Found at Zone %s pfn 0x%lx w:%d\n",
 					       zone->name,
 					       page_to_pfn(page), 
-					       bitmap_weight(cmap, MAX_CACHE_BINS));
+					       bitmap_weight(cmap, MAX_PHALLOC_BINS));
 					return page;
 				}
 			}
@@ -4265,10 +4261,10 @@ static void __meminit zone_init_free_lists(struct zone *zone)
 
 #ifdef CONFIG_CGROUP_PHALLOC
 	int c;
-	for (c = 0; c < MAX_CACHE_BINS; c++) {
+	for (c = 0; c < MAX_PHALLOC_BINS; c++) {
 		INIT_LIST_HEAD(&zone->color_list[c]);
 	}
-	bitmap_zero(zone->color_bitmap, MAX_CACHE_BINS);
+	bitmap_zero(zone->color_bitmap, MAX_PHALLOC_BINS);
 #endif /* CONFIG_CGROUP_PHALLOC */
 
 	for_each_migratetype_order(order, t) {

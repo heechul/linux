@@ -23,15 +23,10 @@
 #define MAX_LINE_LEN (6*128)
 /*
  * Types of files in a phalloc group
- * FILE_COLORS - contain list of colors allowed
- * FILE_PROFILE - contains the profile information for the task
+ * FILE_PHALLOC - contain list of phalloc bins allowed
 */
 typedef enum {
-#if USE_DRAM_AWARE
-	FILE_DRAM_RANK,
-	FILE_DRAM_BANK,
-#endif
-	FILE_COLORS,
+	FILE_PHALLOC,
 } phalloc_filetype_t;
 
 /*
@@ -74,47 +69,20 @@ static int phalloc_file_write(struct cgroup *cgrp, struct cftype *cft,
 {
 	int retval = 0;
 	struct phalloc *ph = cgroup_ph(cgrp);
-	int bank, rank, color;
 
 	if (!cgroup_lock_live_group(cgrp))
 		return -ENODEV;
 
 	switch (cft->private) {
-#if USE_DRAM_AWARE
-	case FILE_DRAM_RANK:
-		retval = update_bitmask(&ph->dram_rankmap, buf, 1<<sysctl_dram_rank_bits); /* up to 4 ranks */
-		printk(KERN_INFO "Rank : %s\n", buf);
-		break;
-	case FILE_DRAM_BANK:
-		retval = update_bitmask(&ph->dram_bankmap, buf, 1<<sysctl_dram_bank_bits); /* up to 8 banks */
-		printk(KERN_INFO "Bank : %s\n", buf);
-		break;
-#endif
-	case FILE_COLORS:
-		retval = update_bitmask(&ph->color_map, buf, 1<<sysctl_cache_color_bits);
+	case FILE_PHALLOC:
+		retval = update_bitmask(ph->cmap, buf, phalloc_bins());
+		printk(KERN_INFO "Bins : %s\n", buf);
 		break;
 	default:
 		retval = -EINVAL;
 		break;
 	}
 
-	/* repopulate the bin map */
-
-	bitmap_zero(ph->cmap, MAX_CACHE_BINS);
-	for_each_set_bit(rank, &ph->dram_rankmap,
-			 1<<sysctl_dram_rank_bits) {
-		for_each_set_bit(bank, &ph->dram_bankmap,
-				 1<<sysctl_dram_bank_bits) {
-			for_each_set_bit(color, &ph->color_map,
-					 1<<sysctl_cache_color_bits) {
-				bitmap_set(ph->cmap,
-					   dram_addr_to_color(
-						   rank, bank, color),
-					   1);
-			}
-		}
-	}
-	
 	cgroup_unlock();
 	return retval;
 }
@@ -136,18 +104,9 @@ static ssize_t phalloc_file_read(struct cgroup *cgrp,
 	s = page;
 
 	switch (cft->private) {
-#if USE_DRAM_AWARE
-	case FILE_DRAM_RANK:
-		s += bitmap_scnlistprintf(s, PAGE_SIZE, &ph->dram_rankmap, 1<<sysctl_dram_rank_bits);
-		printk(KERN_INFO "Rank : %s\n", s);
-		break;
-	case FILE_DRAM_BANK:
-		s += bitmap_scnlistprintf(s, PAGE_SIZE, &ph->dram_bankmap, 1<<sysctl_dram_bank_bits);
-		printk(KERN_INFO "Bank : %s\n", s);
-		break;
-#endif
-	case FILE_COLORS:
-		s += bitmap_scnlistprintf(s, PAGE_SIZE, &ph->color_map, 1<<sysctl_cache_color_bits);
+	case FILE_PHALLOC:
+		s += bitmap_scnlistprintf(s, PAGE_SIZE, ph->cmap, phalloc_bins());
+		printk(KERN_INFO "Bins : %s\n", s);
 		break;
 	default:
 		retval = -EINVAL;
@@ -168,28 +127,12 @@ out:
  * for the common functions, 'private' gives the type of the file
  */
 static struct cftype files[] = {
-#if USE_DRAM_AWARE
 	{
-		.name = "dram_rank",
+		.name = "bins",
 		.read = phalloc_file_read,
 		.write_string = phalloc_file_write,
 		.max_write_len = MAX_LINE_LEN,
-		.private = FILE_DRAM_RANK,
-	},
-	{
-		.name = "dram_bank",
-		.read = phalloc_file_read,
-		.write_string = phalloc_file_write,
-		.max_write_len = MAX_LINE_LEN,
-		.private = FILE_DRAM_BANK,
-	},
-#endif
-	{
-		.name = "colors",
-		.read = phalloc_file_read,
-		.write_string = phalloc_file_write,
-		.max_write_len = MAX_LINE_LEN,
-		.private = FILE_COLORS,
+		.private = FILE_PHALLOC,
 	},
 	{ }	/* terminate */
 };
@@ -213,12 +156,7 @@ static struct cgroup_subsys_state *phalloc_create(struct cgroup *cgrp)
 	if(!ph_child)
 		return ERR_PTR(-ENOMEM);
 
-	bitmap_clear(&ph_child->color_map, 0, 1<<sysctl_cache_color_bits);
-#if USE_DRAM_AWARE
-	bitmap_clear(&ph_child->dram_rankmap, 0, 1<<sysctl_dram_rank_bits);
-	bitmap_clear(&ph_child->dram_bankmap, 0, 1<<sysctl_dram_bank_bits);
-#endif
-	bitmap_clear(ph_child->cmap, 0, MAX_CACHE_BINS);
+	bitmap_clear(ph_child->cmap, 0, MAX_PHALLOC_BINS);
 	return &ph_child->css;
 }
 

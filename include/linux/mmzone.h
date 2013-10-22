@@ -70,14 +70,11 @@ enum {
 #endif
 
 #ifdef CONFIG_CGROUP_PHALLOC
-#  define DEFAULT_COLOR_BITS 3
-#  define DEFAULT_BANK_BITS 3
-#  define DEFAULT_RANK_BITS 2
 /* Determine the number of bins according to the bits required for
    each component of the address*/
-#  define BINS_BITMASK_ORDER (DEFAULT_COLOR_BITS + DEFAULT_BANK_BITS + DEFAULT_RANK_BITS)
-#  define MAX_CACHE_BINS (1 << BINS_BITMASK_ORDER )
-#  define COLOR_BITMAP(name) DECLARE_BITMAP(name, MAX_CACHE_BINS)
+#  define MAX_PHALLOC_BITS 8
+#  define MAX_PHALLOC_BINS (1 << MAX_PHALLOC_BITS)
+#  define COLOR_BITMAP(name) DECLARE_BITMAP(name, MAX_PHALLOC_BINS)
 #endif
 
 #define for_each_migratetype_order(order, type) \
@@ -400,7 +397,7 @@ struct zone {
 	/*
 	 * Color page cache. for movable type free pages of order-0
 	 */
-	struct list_head        color_list[MAX_CACHE_BINS];
+	struct list_head        color_list[MAX_PHALLOC_BINS];
 	COLOR_BITMAP(color_bitmap);
 #endif
 

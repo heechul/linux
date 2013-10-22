@@ -804,6 +804,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 {
 	int order;
 #ifdef CONFIG_CGROUP_PHALLOC
+#include <linux/phalloc.h>
 	int color, mt;
 	int cnt, bins;
 	struct free_area *area;
@@ -824,14 +825,10 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 	}
 	/* order by color */
 	seq_printf(m, "-------\n");
-	bins = (1 << sysctl_dram_rank_bits) * 
-		(1 << sysctl_dram_bank_bits) *
-		(1 << sysctl_cache_color_bits);
+	bins = phalloc_bins();
 
 	for (color = 0; color < bins; color++) {
-		seq_printf(m, "- %s[%d:rank %d, bank %d]", "color", color,
-			   COLOR_TO_DRAM_RANK(color), 
-			   COLOR_TO_DRAM_BANK(color));
+		seq_printf(m, "- color [%d:%0x]", color, color);
 		cnt = 0;
 		list_for_each(curr, &zone->color_list[color])
 			cnt++;
