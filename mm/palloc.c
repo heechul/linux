@@ -1,5 +1,5 @@
 /*
- * kernel/phalloc.c
+ * kernel/palloc.c
  *
  * Physical driven User Space Allocator info for a set of tasks.
  */
@@ -8,7 +8,7 @@
 #include <linux/cgroup.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/phalloc.h>
+#include <linux/palloc.h>
 #include <linux/mm.h>
 #include <linux/err.h>
 #include <linux/fs.h>
@@ -18,38 +18,38 @@
 /*
  * Check if a page is compliant to the policy defined for the given vma
  */
-#ifdef CONFIG_CGROUP_PHALLOC
+#ifdef CONFIG_CGROUP_PALLOC
 
 #define MAX_LINE_LEN (6*128)
 /*
- * Types of files in a phalloc group
- * FILE_PHALLOC - contain list of phalloc bins allowed
+ * Types of files in a palloc group
+ * FILE_PALLOC - contain list of palloc bins allowed
 */
 typedef enum {
-	FILE_PHALLOC,
-} phalloc_filetype_t;
+	FILE_PALLOC,
+} palloc_filetype_t;
 
 /*
- * Top level phalloc - mask initialized to zero implying no restriction on
+ * Top level palloc - mask initialized to zero implying no restriction on
  * physical pages
 */
 
-static struct phalloc top_phalloc;
+static struct palloc top_palloc;
 
-/* Retrieve the phalloc group corresponding to this cgroup container */
-struct phalloc *cgroup_ph(struct cgroup *cgrp)
+/* Retrieve the palloc group corresponding to this cgroup container */
+struct palloc *cgroup_ph(struct cgroup *cgrp)
 {
-	return container_of(cgroup_subsys_state(cgrp, phalloc_subsys_id),
-			    struct phalloc, css);
+	return container_of(cgroup_subsys_state(cgrp, palloc_subsys_id),
+			    struct palloc, css);
 }
 
-struct phalloc * ph_from_subsys(struct cgroup_subsys_state * subsys)
+struct palloc * ph_from_subsys(struct cgroup_subsys_state * subsys)
 {
-	return container_of(subsys, struct phalloc, css);
+	return container_of(subsys, struct palloc, css);
 }
 
 /*
- * Common write function for files in phalloc cgroup
+ * Common write function for files in palloc cgroup
  */
 static int update_bitmask(unsigned long *bitmap, const char *buf, int maxbits)
 {
@@ -64,18 +64,18 @@ static int update_bitmask(unsigned long *bitmap, const char *buf, int maxbits)
 }
 
 
-static int phalloc_file_write(struct cgroup *cgrp, struct cftype *cft,
+static int palloc_file_write(struct cgroup *cgrp, struct cftype *cft,
 			     const char *buf)
 {
 	int retval = 0;
-	struct phalloc *ph = cgroup_ph(cgrp);
+	struct palloc *ph = cgroup_ph(cgrp);
 
 	if (!cgroup_lock_live_group(cgrp))
 		return -ENODEV;
 
 	switch (cft->private) {
-	case FILE_PHALLOC:
-		retval = update_bitmask(ph->cmap, buf, phalloc_bins());
+	case FILE_PALLOC:
+		retval = update_bitmask(ph->cmap, buf, palloc_bins());
 		printk(KERN_INFO "Bins : %s\n", buf);
 		break;
 	default:
@@ -87,13 +87,13 @@ static int phalloc_file_write(struct cgroup *cgrp, struct cftype *cft,
 	return retval;
 }
 
-static ssize_t phalloc_file_read(struct cgroup *cgrp,
+static ssize_t palloc_file_read(struct cgroup *cgrp,
 				struct cftype *cft,
 				struct file *file,
 				char __user *buf,
 				size_t nbytes, loff_t *ppos)
 {
-	struct phalloc *ph = cgroup_ph(cgrp);
+	struct palloc *ph = cgroup_ph(cgrp);
 	char *page;
 	ssize_t retval = 0;
 	char *s;
@@ -104,8 +104,8 @@ static ssize_t phalloc_file_read(struct cgroup *cgrp,
 	s = page;
 
 	switch (cft->private) {
-	case FILE_PHALLOC:
-		s += bitmap_scnlistprintf(s, PAGE_SIZE, ph->cmap, phalloc_bins());
+	case FILE_PALLOC:
+		s += bitmap_scnlistprintf(s, PAGE_SIZE, ph->cmap, palloc_bins());
 		printk(KERN_INFO "Bins : %s\n", s);
 		break;
 	default:
@@ -129,54 +129,54 @@ out:
 static struct cftype files[] = {
 	{
 		.name = "bins",
-		.read = phalloc_file_read,
-		.write_string = phalloc_file_write,
+		.read = palloc_file_read,
+		.write_string = palloc_file_write,
 		.max_write_len = MAX_LINE_LEN,
-		.private = FILE_PHALLOC,
+		.private = FILE_PALLOC,
 	},
 	{ }	/* terminate */
 };
 
 /*
- * phalloc_create - create a phalloc group
+ * palloc_create - create a palloc group
  */
-static struct cgroup_subsys_state *phalloc_create(struct cgroup *cgrp)
+static struct cgroup_subsys_state *palloc_create(struct cgroup *cgrp)
 {
-	struct phalloc * ph_child;
-	struct phalloc * ph_parent;
+	struct palloc * ph_child;
+	struct palloc * ph_parent;
 
 	printk(KERN_INFO "Creating the new cgroup - %p\n", cgrp);
 
 	if (!cgrp->parent) {
-		return &top_phalloc.css;
+		return &top_palloc.css;
 	}
 	ph_parent = cgroup_ph(cgrp->parent);
 
-	ph_child = kmalloc(sizeof(struct phalloc), GFP_KERNEL);
+	ph_child = kmalloc(sizeof(struct palloc), GFP_KERNEL);
 	if(!ph_child)
 		return ERR_PTR(-ENOMEM);
 
-	bitmap_clear(ph_child->cmap, 0, MAX_PHALLOC_BINS);
+	bitmap_clear(ph_child->cmap, 0, MAX_PALLOC_BINS);
 	return &ph_child->css;
 }
 
 
 /*
- * Destroy an existing phalloc group
+ * Destroy an existing palloc group
  */
-static void phalloc_destroy(struct cgroup *cgrp)
+static void palloc_destroy(struct cgroup *cgrp)
 {
-	struct phalloc *ph = cgroup_ph(cgrp);
+	struct palloc *ph = cgroup_ph(cgrp);
 	printk(KERN_INFO "Deleting the cgroup - %p\n",cgrp);
 	kfree(ph);
 }
 
-struct cgroup_subsys phalloc_subsys = {
-	.name = "phalloc",
-	.create = phalloc_create,
-	.destroy = phalloc_destroy,
-	.subsys_id = phalloc_subsys_id,
+struct cgroup_subsys palloc_subsys = {
+	.name = "palloc",
+	.create = palloc_create,
+	.destroy = palloc_destroy,
+	.subsys_id = palloc_subsys_id,
 	.base_cftypes = files,
 };
 
-#endif /* CONFIG_CGROUP_PHALLOC */
+#endif /* CONFIG_CGROUP_PALLOC */

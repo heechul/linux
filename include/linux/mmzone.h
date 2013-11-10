@@ -69,12 +69,12 @@ enum {
 #  define cma_wmark_pages(zone) 0
 #endif
 
-#ifdef CONFIG_CGROUP_PHALLOC
+#ifdef CONFIG_CGROUP_PALLOC
 /* Determine the number of bins according to the bits required for
    each component of the address*/
-#  define MAX_PHALLOC_BITS 8
-#  define MAX_PHALLOC_BINS (1 << MAX_PHALLOC_BITS)
-#  define COLOR_BITMAP(name) DECLARE_BITMAP(name, MAX_PHALLOC_BINS)
+#  define MAX_PALLOC_BITS 8
+#  define MAX_PALLOC_BINS (1 << MAX_PALLOC_BITS)
+#  define COLOR_BITMAP(name) DECLARE_BITMAP(name, MAX_PALLOC_BINS)
 #endif
 
 #define for_each_migratetype_order(order, type) \
@@ -393,11 +393,11 @@ struct zone {
 #endif
 	struct free_area	free_area[MAX_ORDER];
 
-#ifdef CONFIG_CGROUP_PHALLOC
+#ifdef CONFIG_CGROUP_PALLOC
 	/*
 	 * Color page cache. for movable type free pages of order-0
 	 */
-	struct list_head        color_list[MAX_PHALLOC_BINS];
+	struct list_head        color_list[MAX_PALLOC_BINS];
 	COLOR_BITMAP(color_bitmap);
 #endif
 

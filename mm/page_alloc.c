@@ -64,16 +64,16 @@
 #include <asm/div64.h>
 #include "internal.h"
 
-#ifdef CONFIG_CGROUP_PHALLOC
-#include <linux/phalloc.h>
+#ifdef CONFIG_CGROUP_PALLOC
+#include <linux/palloc.h>
 
 int memdbg_enable = 0;
 EXPORT_SYMBOL(memdbg_enable);
 
 int sysctl_alloc_balance = 0;
 
-/* phalloc address bitmask */
-unsigned long sysctl_phalloc_mask = 0x0;
+/* palloc address bitmask */
+unsigned long sysctl_palloc_mask = 0x0;
 
 #define memdbg(lvl, fmt, ...)					\
         do {                                                    \
@@ -81,7 +81,7 @@ unsigned long sysctl_phalloc_mask = 0x0;
 			trace_printk(fmt, ##__VA_ARGS__);       \
         } while(0)
 
-struct phalloc_stat {
+struct palloc_stat {
 	s64 max_ns;
 	s64 min_ns;
 	s64 tot_ns;
@@ -102,12 +102,12 @@ struct phalloc_stat {
 static struct {
         u32 enabled;
 	int colors;
-	struct phalloc_stat stat[3]; /* 0 - color, 1 - normal, 2 - fail */
-} phalloc;
+	struct palloc_stat stat[3]; /* 0 - color, 1 - normal, 2 - fail */
+} palloc;
 
-static void phalloc_flush(struct zone *zone);
+static void palloc_flush(struct zone *zone);
 
-static ssize_t phalloc_write(struct file *filp, const char __user *ubuf,
+static ssize_t palloc_write(struct file *filp, const char __user *ubuf,
 				      size_t cnt, loff_t *ppos)
 {
         char buf[64];
@@ -118,9 +118,9 @@ static ssize_t phalloc_write(struct file *filp, const char __user *ubuf,
 
 	if (!strncmp(buf, "reset", 5)) {
 		printk(KERN_INFO "reset statistics...\n");
-		for (i = 0; i < ARRAY_SIZE(phalloc.stat); i++) {
-			memset(&phalloc.stat[i], 0, sizeof(struct phalloc_stat));
-			phalloc.stat[i].min_ns = 0x7fffffff;
+		for (i = 0; i < ARRAY_SIZE(palloc.stat); i++) {
+			memset(&palloc.stat[i], 0, sizeof(struct palloc_stat));
+			palloc.stat[i].min_ns = 0x7fffffff;
 		}
 	} else if (!strncmp(buf, "flush", 5)) {
 		struct zone *zone;
@@ -130,7 +130,7 @@ static ssize_t phalloc_write(struct file *filp, const char __user *ubuf,
 			if (!zone)
 				continue;
 			spin_lock_irqsave(&zone->lock, flags);
-			phalloc_flush(zone);
+			palloc_flush(zone);
 			spin_unlock_irqrestore(&zone->lock, flags);
 		}
 	}
@@ -139,13 +139,13 @@ static ssize_t phalloc_write(struct file *filp, const char __user *ubuf,
         return cnt;
 }
 
-static int phalloc_show(struct seq_file *m, void *v)
+static int palloc_show(struct seq_file *m, void *v)
 {
 	int i, tmp;
 	char *desc[] = { "Color", "Normal", "Fail" };
 	char buf[256];
 	for (i = 0; i < 3; i++) {
-		struct phalloc_stat *stat = &phalloc.stat[i];
+		struct palloc_stat *stat = &palloc.stat[i];
 		seq_printf(m, "statistics %s:\n", desc[i]);
 		seq_printf(m, "  min(ns)/max(ns)/avg(ns)/tot_cnt: %lld %lld %lld %lld\n",
 			   stat->min_ns,
@@ -165,45 +165,45 @@ static int phalloc_show(struct seq_file *m, void *v)
 		seq_printf(m, "  balance: %lld | fail: %lld\n", 
 			   stat->alloc_balance, stat->alloc_balance_timeout);
 	}
-	seq_printf(m, "mask: 0x%lx\n", sysctl_phalloc_mask);
-	tmp = bitmap_weight(&sysctl_phalloc_mask, sizeof(unsigned long)*8);
+	seq_printf(m, "mask: 0x%lx\n", sysctl_palloc_mask);
+	tmp = bitmap_weight(&sysctl_palloc_mask, sizeof(unsigned long)*8);
 	seq_printf(m, "weight: %d  (bins: %d)\n", tmp, 1<<tmp);
-	bitmap_scnlistprintf(buf, 256, &sysctl_phalloc_mask, sizeof(unsigned long)*8);
+	bitmap_scnlistprintf(buf, 256, &sysctl_palloc_mask, sizeof(unsigned long)*8);
 	seq_printf(m, "bits: %s\n", buf);
         return 0;
 }
-static int phalloc_open(struct inode *inode, struct file *filp)
+static int palloc_open(struct inode *inode, struct file *filp)
 {
-        return single_open(filp, phalloc_show, NULL);
+        return single_open(filp, palloc_show, NULL);
 }
 
-static const struct file_operations phalloc_fops = {
-        .open           = phalloc_open,
-        .write          = phalloc_write,
+static const struct file_operations palloc_fops = {
+        .open           = palloc_open,
+        .write          = palloc_write,
         .read           = seq_read,
         .llseek         = seq_lseek,
         .release        = single_release,
 };
 
-static int __init phalloc_debugfs(void)
+static int __init palloc_debugfs(void)
 {
         umode_t mode = S_IFREG | S_IRUSR | S_IWUSR;
         struct dentry *dir;
 	int i;
 
-        dir = debugfs_create_dir("phalloc", NULL);
+        dir = debugfs_create_dir("palloc", NULL);
 
 	/* statistics initialization */
-	for (i = 0; i < ARRAY_SIZE(phalloc.stat); i++) {
-		memset(&phalloc.stat[i], 0, sizeof(struct phalloc_stat));
-		phalloc.stat[i].min_ns = 0x7fffffff;
+	for (i = 0; i < ARRAY_SIZE(palloc.stat); i++) {
+		memset(&palloc.stat[i], 0, sizeof(struct palloc_stat));
+		palloc.stat[i].min_ns = 0x7fffffff;
 	}
 
         if (!dir)
                 return PTR_ERR(dir);
-        if (!debugfs_create_file("control", mode, dir, NULL, &phalloc_fops))
+        if (!debugfs_create_file("control", mode, dir, NULL, &palloc_fops))
                 goto fail;
-	if (!debugfs_create_u64("phalloc_mask", mode, dir, (u64 *)&sysctl_phalloc_mask))
+	if (!debugfs_create_u64("palloc_mask", mode, dir, (u64 *)&sysctl_palloc_mask))
 		goto fail;
         if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
                 goto fail;
@@ -215,9 +215,9 @@ fail:
         return -ENOMEM;
 }
 
-late_initcall(phalloc_debugfs);
+late_initcall(palloc_debugfs);
 
-#endif /* CONFIG_CGROUP_PHALLOC */
+#endif /* CONFIG_CGROUP_PALLOC */
 
 #ifdef CONFIG_USE_PERCPU_NUMA_NODE_ID
 DEFINE_PER_CPU(int, numa_node);
@@ -1018,12 +1018,12 @@ static int prep_new_page(struct page *page, int order, gfp_t gfp_flags)
 	return 0;
 }
 
-#ifdef CONFIG_CGROUP_PHALLOC
+#ifdef CONFIG_CGROUP_PALLOC
 
-int phalloc_bins(void)
+int palloc_bins(void)
 {
-	return min((1 << bitmap_weight(&sysctl_phalloc_mask, 8*sizeof (unsigned long))),
-		   MAX_PHALLOC_BINS);
+	return min((1 << bitmap_weight(&sysctl_palloc_mask, 8*sizeof (unsigned long))),
+		   MAX_PALLOC_BINS);
 }
 
 static inline int page_to_color(struct page *page)
@@ -1032,7 +1032,7 @@ static inline int page_to_color(struct page *page)
 	int idx = 0;
 	int c;
 	unsigned long paddr = page_to_phys(page);
-	for_each_set_bit(c, &sysctl_phalloc_mask, sizeof(unsigned long) * 8)  {
+	for_each_set_bit(c, &sysctl_palloc_mask, sizeof(unsigned long) * 8)  {
 		if ((unsigned long)paddr & (1<<c))
 			color |= (1<<idx);
 		idx++;
@@ -1053,14 +1053,14 @@ static inline unsigned long list_count(struct list_head *head)
 /* move all color_list pages into free_area[0].freelist[2]
  * zone->lock must be hold before calling this function
  */
-static void phalloc_flush(struct zone *zone)
+static void palloc_flush(struct zone *zone)
 {
 	int c;
 	struct page *page;
 	memdbg(2, "flush the ccache for zone %s\n", zone->name);
 
 	while (1) {
-		for (c = 0; c < MAX_PHALLOC_BINS; c++) {
+		for (c = 0; c < MAX_PALLOC_BINS; c++) {
 			if (!list_empty(&zone->color_list[c])) {
 				page = list_entry(zone->color_list[c].next, 
 						  struct page, lru);
@@ -1076,13 +1076,13 @@ static void phalloc_flush(struct zone *zone)
 			}
 		}
 
-		if (bitmap_weight(zone->color_bitmap, MAX_PHALLOC_BINS) == 0)
+		if (bitmap_weight(zone->color_bitmap, MAX_PALLOC_BINS) == 0)
 			break;
 	}
 }
 
 /* move a page (size=1<<order) into a order-0 colored cache */
-static void phalloc_insert(struct zone *zone, struct page *page, int order)
+static void palloc_insert(struct zone *zone, struct page *page, int order)
 {
 	int i, color;
 	/* 1 page (2^order) -> 2^order x pages of colored cache. */
@@ -1107,9 +1107,9 @@ static void phalloc_insert(struct zone *zone, struct page *page, int order)
 }
 
 /* return a colored page (order-0) and remove it from the colored cache */
-static struct page *phalloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
+static struct page *palloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 				     int order,
-				     struct phalloc_stat *stat)
+				     struct palloc_stat *stat)
 {
 	struct page *page;
 	COLOR_BITMAP(tmpmask);
@@ -1122,14 +1122,14 @@ static struct page *phalloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	if (stat) stat->cache_acc_cnt++;
 	
 	/* find color cache entry */
-	if (!bitmap_intersects(zone->color_bitmap, cmap, MAX_PHALLOC_BINS))
+	if (!bitmap_intersects(zone->color_bitmap, cmap, MAX_PALLOC_BINS))
 		return NULL;
 
-	bitmap_and(tmpmask, zone->color_bitmap, cmap, MAX_PHALLOC_BINS);
+	bitmap_and(tmpmask, zone->color_bitmap, cmap, MAX_PALLOC_BINS);
 
 	/* must have a balance. */
-	found_w = bitmap_weight(tmpmask, MAX_PHALLOC_BINS);
-	want_w  = bitmap_weight(cmap, MAX_PHALLOC_BINS);
+	found_w = bitmap_weight(tmpmask, MAX_PALLOC_BINS);
+	want_w  = bitmap_weight(cmap, MAX_PALLOC_BINS);
 	if (sysctl_alloc_balance && 
 	    found_w < want_w && 
 	    found_w <= sysctl_alloc_balance &&
@@ -1151,12 +1151,12 @@ static struct page *phalloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	rand_seed ++; /* essentially bank,rank interleaving */
         tmp_idx = rand_seed % found_w;
 
-	for_each_set_bit(c, tmpmask, MAX_PHALLOC_BINS) {
+	for_each_set_bit(c, tmpmask, MAX_PALLOC_BINS) {
 		if (tmp_idx-- <= 0) 
 			break;
 	}
 
-	BUG_ON(c >= MAX_PHALLOC_BINS);
+	BUG_ON(c >= MAX_PALLOC_BINS);
 	BUG_ON(list_empty(&zone->color_list[c]));
 	
 	page = list_entry(zone->color_list[c].next, struct page, lru);
@@ -1179,7 +1179,7 @@ static struct page *phalloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 }
 
 static inline void 
-update_stat(struct phalloc_stat *stat, struct page *page, int iters)
+update_stat(struct palloc_stat *stat, struct page *page, int iters)
 {
 	ktime_t dur;
 
@@ -1215,10 +1215,10 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	struct list_head *curr, *tmp;
 	struct page *page;
 
-	struct phalloc *ph;
-	struct phalloc_stat *c_stat = &phalloc.stat[0];
-	struct phalloc_stat *n_stat = &phalloc.stat[1];
-	struct phalloc_stat *f_stat = &phalloc.stat[2];
+	struct palloc *ph;
+	struct palloc_stat *c_stat = &palloc.stat[0];
+	struct palloc_stat *n_stat = &palloc.stat[1];
+	struct palloc_stat *f_stat = &palloc.stat[2];
 	int iters = 0;
 	COLOR_BITMAP(tmpcmap);
 	unsigned long *cmap;
@@ -1230,11 +1230,11 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		goto normal_buddy_alloc;
 
 	/* cgroup information */
-	ph = ph_from_subsys(current->cgroups->subsys[phalloc_subsys_id]);
-	if (ph && bitmap_weight(ph->cmap, MAX_PHALLOC_BINS) > 0)
+	ph = ph_from_subsys(current->cgroups->subsys[palloc_subsys_id]);
+	if (ph && bitmap_weight(ph->cmap, MAX_PALLOC_BINS) > 0)
 		cmap = ph->cmap;
 	else {
-		bitmap_fill(tmpcmap, MAX_PHALLOC_BINS);
+		bitmap_fill(tmpcmap, MAX_PALLOC_BINS);
 		cmap = tmpcmap;
 	}
 
@@ -1242,7 +1242,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	if (order == 0) {
 		/* find in the cache */
 		memdbg(2, "check color cache (mt=%d)\n", migratetype);
-		page = phalloc_find_cmap(zone, cmap, 0, c_stat);
+		page = palloc_find_cmap(zone, cmap, 0, c_stat);
 
 		if (page) {
 			update_stat(c_stat, page, iters);
@@ -1269,14 +1269,14 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			{
 				iters++;
 				page = list_entry(curr, struct page, lru);
-				phalloc_insert(zone, page, current_order);
-				page = phalloc_find_cmap(zone, cmap, current_order, c_stat);
+				palloc_insert(zone, page, current_order);
+				page = palloc_find_cmap(zone, cmap, current_order, c_stat);
 				if (page) {
 					update_stat(c_stat, page, iters);
 					memdbg(1, "Found at Zone %s pfn 0x%lx w:%d\n",
 					       zone->name,
 					       page_to_pfn(page), 
-					       bitmap_weight(cmap, MAX_PHALLOC_BINS));
+					       bitmap_weight(cmap, MAX_PALLOC_BINS));
 					return page;
 				}
 			}
@@ -1314,7 +1314,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 	return NULL;
 }
-#else /* !CONFIG_CGROUP_PHALLOC */
+#else /* !CONFIG_CGROUP_PALLOC */
 
 static inline
 struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
@@ -1341,7 +1341,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 
 	return NULL;
 }
-#endif /* CONFIG_CGROUP_PHALLOC */
+#endif /* CONFIG_CGROUP_PALLOC */
 
 /*
  * This array describes the order lists are fallen back to when
@@ -1891,9 +1891,9 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 	unsigned long flags;
 	struct page *page;
 	int cold = !!(gfp_flags & __GFP_COLD);
-	struct phalloc * ph;
+	struct palloc * ph;
 	
-	ph = ph_from_subsys(current->cgroups->subsys[phalloc_subsys_id]);
+	ph = ph_from_subsys(current->cgroups->subsys[palloc_subsys_id]);
 		
 again:
 	/* Skip PCP when physically-aware allocation is requested */
@@ -4259,13 +4259,13 @@ static void __meminit zone_init_free_lists(struct zone *zone)
 {
 	int order, t;
 
-#ifdef CONFIG_CGROUP_PHALLOC
+#ifdef CONFIG_CGROUP_PALLOC
 	int c;
-	for (c = 0; c < MAX_PHALLOC_BINS; c++) {
+	for (c = 0; c < MAX_PALLOC_BINS; c++) {
 		INIT_LIST_HEAD(&zone->color_list[c]);
 	}
-	bitmap_zero(zone->color_bitmap, MAX_PHALLOC_BINS);
-#endif /* CONFIG_CGROUP_PHALLOC */
+	bitmap_zero(zone->color_bitmap, MAX_PALLOC_BINS);
+#endif /* CONFIG_CGROUP_PALLOC */
 
 	for_each_migratetype_order(order, t) {
 		INIT_LIST_HEAD(&zone->free_area[order].free_list[t]);
@@ -6382,8 +6382,8 @@ __offline_isolated_pages(unsigned long start_pfn, unsigned long end_pfn)
 		return;
 	zone = page_zone(pfn_to_page(pfn));
 	spin_lock_irqsave(&zone->lock, flags);
-#ifdef CONFIG_CGROUP_PHALLOC
-	phalloc_flush(zone);
+#ifdef CONFIG_CGROUP_PALLOC
+	palloc_flush(zone);
 #endif
 	pfn = start_pfn;
 	while (pfn < end_pfn) {

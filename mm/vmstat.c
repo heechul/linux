@@ -20,7 +20,7 @@
 #include <linux/writeback.h>
 #include <linux/compaction.h>
 
-#include <linux/phalloc.h>
+#include <linux/palloc.h>
 
 #ifdef CONFIG_VM_EVENT_COUNTERS
 DEFINE_PER_CPU(struct vm_event_state, vm_event_states) = {{0}};
@@ -803,8 +803,8 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 						struct zone *zone)
 {
 	int order;
-#ifdef CONFIG_CGROUP_PHALLOC
-#include <linux/phalloc.h>
+#ifdef CONFIG_CGROUP_PALLOC
+#include <linux/palloc.h>
 	int color, mt;
 	int cnt, bins;
 	struct free_area *area;
@@ -825,7 +825,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 	}
 	/* order by color */
 	seq_printf(m, "-------\n");
-	bins = phalloc_bins();
+	bins = palloc_bins();
 
 	for (color = 0; color < bins; color++) {
 		seq_printf(m, "- color [%d:%0x]", color, color);
@@ -834,7 +834,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 			cnt++;
 		seq_printf(m, "%6d\n", cnt);
 	}
-#endif /* !CONFIG_CGROUP_PHALLOC */
+#endif /* !CONFIG_CGROUP_PALLOC */
 
 	seq_printf(m, "Node %d, zone %8s ", pgdat->node_id, zone->name);
 	for (order = 0; order < MAX_ORDER; ++order)
