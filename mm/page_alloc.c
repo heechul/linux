@@ -75,6 +75,8 @@ int sysctl_alloc_balance = 0;
 /* palloc address bitmask */
 unsigned long sysctl_palloc_mask = 0x0;
 
+DEFINE_PER_CPU(long, palloc_rand_seed);
+
 #define memdbg(lvl, fmt, ...)					\
         do {                                                    \
 		if(memdbg_enable >= lvl)			\
@@ -1114,10 +1116,9 @@ static struct page *palloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	struct page *page;
 	COLOR_BITMAP(tmpmask);
 	int c;
-	static unsigned int rand_seed = 0;
 	unsigned int tmp_idx;
 	int found_w, want_w;
-
+	long rand_seed;
 	/* cache statistics */
 	if (stat) stat->cache_acc_cnt++;
 	
@@ -1148,13 +1149,16 @@ static struct page *palloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
 	}
 
 	/* choose a bit among the candidates */
-	rand_seed ++; /* essentially bank,rank interleaving */
-        tmp_idx = rand_seed % found_w;
+	rand_seed = per_cpu(palloc_rand_seed, smp_processor_id())++; 
+	tmp_idx = rand_seed % found_w;
+	if (rand_seed > MAX_PALLOC_BINS)
+		per_cpu(palloc_rand_seed, smp_processor_id()) = 0;
 
 	for_each_set_bit(c, tmpmask, MAX_PALLOC_BINS) {
 		if (tmp_idx-- <= 0) 
 			break;
 	}
+
 
 	BUG_ON(c >= MAX_PALLOC_BINS);
 	BUG_ON(list_empty(&zone->color_list[c]));
