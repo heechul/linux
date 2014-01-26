@@ -70,10 +70,12 @@
 int memdbg_enable = 0;
 EXPORT_SYMBOL(memdbg_enable);
 
-int sysctl_alloc_balance = 0;
-
+static int sysctl_alloc_balance = 0;
 /* palloc address bitmask */
-unsigned long sysctl_palloc_mask = 0x0;
+static unsigned long sysctl_palloc_mask = 0x0;
+
+static int mc_xor_bits[64];
+static int use_mc_xor = 0;
 
 DEFINE_PER_CPU(long, palloc_rand_seed);
 
@@ -135,6 +137,15 @@ static ssize_t palloc_write(struct file *filp, const char __user *ubuf,
 			palloc_flush(zone);
 			spin_unlock_irqrestore(&zone->lock, flags);
 		}
+	} else if (!strncmp(buf, "xor", 3)) {
+		int bit, xor_bit;
+		sscanf(buf + 4, "%d %d", &bit, &xor_bit);
+		if ((bit > 0 && bit < 64) &&
+		    (xor_bit > 0 && xor_bit < 64) && 
+		    bit != xor_bit) 
+		{
+			mc_xor_bits[bit] = xor_bit;
+		}
 	}
 
         *ppos += cnt;
@@ -172,6 +183,12 @@ static int palloc_show(struct seq_file *m, void *v)
 	seq_printf(m, "weight: %d  (bins: %d)\n", tmp, 1<<tmp);
 	bitmap_scnlistprintf(buf, 256, &sysctl_palloc_mask, sizeof(unsigned long)*8);
 	seq_printf(m, "bits: %s\n", buf);
+
+	seq_printf(m, "XOR bits: %s\n", (use_mc_xor) ? "enabled" : "disabled");
+	for (i = 0; i < 64; i++) {
+		if (mc_xor_bits[i] > 0)
+			seq_printf(m, "   %3d <-> %3d\n", i, mc_xor_bits[i]);
+	}
         return 0;
 }
 static int palloc_open(struct inode *inode, struct file *filp)
@@ -207,6 +224,8 @@ static int __init palloc_debugfs(void)
                 goto fail;
 	if (!debugfs_create_u64("palloc_mask", mode, dir, (u64 *)&sysctl_palloc_mask))
 		goto fail;
+        if (!debugfs_create_u32("use_mc_xor", mode, dir, &use_mc_xor))
+                goto fail;
         if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
                 goto fail;
 	if (!debugfs_create_u32("alloc_balance", mode, dir, &sysctl_alloc_balance))
@@ -1034,9 +1053,14 @@ static inline int page_to_color(struct page *page)
 	int idx = 0;
 	int c;
 	unsigned long paddr = page_to_phys(page);
-	for_each_set_bit(c, &sysctl_palloc_mask, sizeof(unsigned long) * 8)  {
-		if ((unsigned long)paddr & (1<<c))
-			color |= (1<<idx);
+	for_each_set_bit(c, &sysctl_palloc_mask, sizeof(unsigned long) * 8) {
+		if (use_mc_xor) {
+			if (((paddr >> c) & 0x1) ^ ((paddr >> mc_xor_bits[c]) & 0x1))
+				color |= (1<<idx);
+		} else {
+			if ((paddr >> c) & 0x1)
+				color |= (1<<idx);
+		}
 		idx++;
 	}
 	return color;
