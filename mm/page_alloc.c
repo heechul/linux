@@ -76,6 +76,7 @@ static unsigned long sysctl_palloc_mask = 0x0;
 
 static int mc_xor_bits[64];
 static int use_mc_xor = 0;
+static int use_palloc = 0;
 
 DEFINE_PER_CPU(long, palloc_rand_seed);
 
@@ -189,6 +190,8 @@ static int palloc_show(struct seq_file *m, void *v)
 		if (mc_xor_bits[i] > 0)
 			seq_printf(m, "   %3d <-> %3d\n", i, mc_xor_bits[i]);
 	}
+
+	seq_printf(m, "Use PALLOC: %s\n", (use_palloc) ? "enabled" : "disabled");
         return 0;
 }
 static int palloc_open(struct inode *inode, struct file *filp)
@@ -225,6 +228,8 @@ static int __init palloc_debugfs(void)
 	if (!debugfs_create_u64("palloc_mask", mode, dir, (u64 *)&sysctl_palloc_mask))
 		goto fail;
         if (!debugfs_create_u32("use_mc_xor", mode, dir, &use_mc_xor))
+                goto fail;
+        if (!debugfs_create_u32("use_palloc", mode, dir, &use_palloc))
                 goto fail;
         if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
                 goto fail;
@@ -1174,7 +1179,7 @@ static inline struct page *palloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap
 
 	/* choose a bit among the candidates */
 	if (sysctl_alloc_balance && memdbg_enable) {
-		rand_seed = stat->start.tv64 % found_w;
+		rand_seed = (long)stat->start.tv64;
 	} else {
 		rand_seed = per_cpu(palloc_rand_seed, smp_processor_id())++; 
 		if (rand_seed > MAX_PALLOC_BINS)
@@ -1233,7 +1238,7 @@ update_stat(struct palloc_stat *stat, struct page *page, int iters)
 		       (int)page_to_color(page),
 		       iters, dur.tv64);
 	} else {
-		printk(KERN_WARNING "dur %lld is < 0\n", dur.tv64);
+		memdbg(5, "dur %lld is < 0\n", dur.tv64);
 	}
 }
 
@@ -1261,7 +1266,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	if (memdbg_enable)
 		c_stat->start = n_stat->start = f_stat->start = ktime_get();
 
-	if (memdbg_enable == 99)
+	if (!use_palloc)
 		goto normal_buddy_alloc;
 
 	/* cgroup information */
