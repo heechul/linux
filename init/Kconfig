@@ -1075,6 +1075,12 @@ config DEBUG_BLK_CGROUP
 	Enable some debugging help. Currently it exports additional stat
 	files in a cgroup which can be useful for debugging.
 
+config CGROUP_PALLOC
+	bool "Enable PALLOC"
+	help
+	  Enables PALLOC: physical address based page allocator that 
+	  replaces the buddy allocator.
+
 endif # CGROUPS
 
 config CHECKPOINT_RESTORE
