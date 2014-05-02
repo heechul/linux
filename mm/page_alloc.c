@@ -1928,11 +1928,15 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 	int cold = !!(gfp_flags & __GFP_COLD);
 	struct palloc * ph;
 	
-	ph = ph_from_subsys(current->cgroups->subsys[palloc_subsys_id]);
-		
 again:
+
+#if CONFIG_CGROUP_PALLOC
+	ph = ph_from_subsys(current->cgroups->subsys[palloc_subsys_id]);
 	/* Skip PCP when physically-aware allocation is requested */
 	if (likely(order == 0) && !ph) {
+#else
+	if (likely(order == 0)) {
+#endif
 		struct per_cpu_pages *pcp;
 		struct list_head *list;
 
