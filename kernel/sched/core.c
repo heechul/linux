@@ -1906,6 +1906,42 @@ fire_sched_out_preempt_notifiers(struct task_struct *curr,
  * prepare_task_switch sets up locking and calls architecture specific
  * hooks.
  */
+
+#if CONFIG_BWLOCK
+static void (*bw_lock_func_ptr)(void);
+static void (*bw_unlock_func_ptr)(void);
+
+void register_bw_lock_callback(void *func_ptr)
+{
+	bw_lock_func_ptr = func_ptr;
+}
+
+void register_bw_unlock_callback(void *func_ptr)
+{
+	bw_unlock_func_ptr = func_ptr;
+}
+
+EXPORT_SYMBOL(register_bw_lock_callback);
+EXPORT_SYMBOL(register_bw_unlock_callback);
+
+static inline void
+prepare_task_switch(struct rq *rq, struct task_struct *prev,
+		    struct task_struct *next)
+{
+	if (rt_task(prev) && bw_unlock_func_ptr)
+		bw_unlock_func_ptr();
+	if (rt_task(next) && bw_lock_func_ptr)
+		bw_lock_func_ptr();
+
+	trace_sched_switch(prev, next);
+	sched_info_switch(prev, next);
+	perf_event_task_sched_out(prev, next);
+	fire_sched_out_preempt_notifiers(prev, next);
+	prepare_lock_switch(rq, next);
+	prepare_arch_switch(next);
+}
+
+#else /* !CONFIG_BWLOCK */
 static inline void
 prepare_task_switch(struct rq *rq, struct task_struct *prev,
 		    struct task_struct *next)
@@ -1917,6 +1953,7 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
 	prepare_lock_switch(rq, next);
 	prepare_arch_switch(next);
 }
+#endif
 
 /**
  * finish_task_switch - clean up after a task-switch
@@ -4216,6 +4253,10 @@ static struct task_struct *find_process_by_pid(pid_t pid)
 static void
 __setscheduler(struct rq *rq, struct task_struct *p, int policy, int prio)
 {
+#if CONFIG_BWLOCK
+	if (rt_policy(policy) && p->policy != policy && bw_lock_func_ptr)
+		bw_lock_func_ptr();
+#endif
 	p->policy = policy;
 	p->rt_priority = prio;
 	p->normal_prio = normal_prio(p);

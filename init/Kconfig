@@ -854,6 +854,11 @@ config CGROUP_PALLOC
 
 endif # CGROUPS
 
+config BWLOCK
+	bool "Enable BWLOCK: Memory Bandwidth Lock"
+	help
+	  Enable BWLOCK: Memory Bandwidth Lock (work with MemGuard)
+
 config CHECKPOINT_RESTORE
 	bool "Checkpoint/restore support" if EXPERT
 	default n
