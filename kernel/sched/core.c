@@ -1908,30 +1908,17 @@ fire_sched_out_preempt_notifiers(struct task_struct *curr,
  */
 
 #if CONFIG_BWLOCK
-static void (*bw_lock_func_ptr)(void);
-static void (*bw_unlock_func_ptr)(void);
-
-void register_bw_lock_callback(void *func_ptr)
-{
-	bw_lock_func_ptr = func_ptr;
-}
-
-void register_bw_unlock_callback(void *func_ptr)
-{
-	bw_unlock_func_ptr = func_ptr;
-}
-
-EXPORT_SYMBOL(register_bw_lock_callback);
-EXPORT_SYMBOL(register_bw_unlock_callback);
+atomic_t bwlock_core_cnt; 
+EXPORT_SYMBOL(bwlock_core_cnt);
 
 static inline void
 prepare_task_switch(struct rq *rq, struct task_struct *prev,
 		    struct task_struct *next)
 {
-	if (rt_task(prev) && bw_unlock_func_ptr)
-		bw_unlock_func_ptr();
-	if (rt_task(next) && bw_lock_func_ptr)
-		bw_lock_func_ptr();
+	/* if (prev->bwlock_val > 0 && next->bwlock_val == 0) */
+	/* 	atomic_dec(&bwlock_core_cnt); */
+	/* else if (prev->bwlock_val == 0 && next->bwlock_val > 0) */
+	/* 	atomic_inc(&bwlock_core_cnt); */
 
 	trace_sched_switch(prev, next);
 	sched_info_switch(prev, next);
@@ -2128,6 +2115,18 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 */
 	finish_task_switch(this_rq(), prev);
 }
+
+
+int nr_bwlocked_cores(void)
+{
+	unsigned long i, sum = 0;
+
+	for_each_online_cpu(i)
+		sum += cpu_rq(i)->curr->bwlock_val;
+	return sum;
+}
+
+EXPORT_SYMBOL(nr_bwlocked_cores);
 
 /*
  * nr_running, nr_uninterruptible and nr_context_switches:
@@ -4253,10 +4252,6 @@ static struct task_struct *find_process_by_pid(pid_t pid)
 static void
 __setscheduler(struct rq *rq, struct task_struct *p, int policy, int prio)
 {
-#if CONFIG_BWLOCK
-	if (rt_policy(policy) && p->policy != policy && bw_lock_func_ptr)
-		bw_lock_func_ptr();
-#endif
 	p->policy = policy;
 	p->rt_priority = prio;
 	p->normal_prio = normal_prio(p);
@@ -4490,6 +4485,33 @@ do_sched_setscheduler(pid_t pid, int policy, struct sched_param __user *param)
 	rcu_read_unlock();
 
 	return retval;
+}
+
+
+/**
+ * sys_bwlock - memory bandwidth lock
+ * @pid: pid of the process
+ * @val: bwlock value. 0 - unlock, 1 or bigger - locked
+ */
+SYSCALL_DEFINE2(bwlock, pid_t, pid, int, val)
+{
+	struct task_struct *p;
+	if (pid == 0 || current->pid == pid)
+		p = current;
+	else
+		p = find_process_by_pid(pid);
+
+	if (!p)
+		return -1;
+
+	/* if (val > 0 && p->bwlock_val == 0 && p->state == TASK_RUNNING) */
+	/* 	atomic_inc(&bwlock_core_cnt); */
+	/* else if (val == 0 && p->bwlock_val > 0 && p->state == TASK_RUNNING) */
+	/* 	atomic_dec(&bwlock_core_cnt); */
+
+	p->bwlock_val = val;
+
+	return 0; 
 }
 
 /**
@@ -7251,6 +7273,10 @@ void __init sched_init(void)
 {
 	int i, j;
 	unsigned long alloc_size = 0, ptr;
+
+#ifdef CONFIG_BWLOCK
+	atomic_set(&bwlock_core_cnt, 0);
+#endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	alloc_size += 2 * nr_cpu_ids * sizeof(void **);

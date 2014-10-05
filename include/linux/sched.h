@@ -1253,6 +1253,10 @@ struct task_struct {
 	struct task_group *sched_task_group;
 #endif
 
+#ifdef CONFIG_BWLOCK
+	int bwlock_val;
+#endif
+
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	/* list of struct preempt_notifier: */
 	struct hlist_head preempt_notifiers;
