@@ -31,6 +31,8 @@
 
 #include "sched.h"
 
+#include <linux/module.h>
+
 /*
  * Targeted preemption latency for CPU-bound tasks:
  * (default: 6ms * (1 + ilog(ncpus)), units: nanoseconds)
@@ -95,6 +97,10 @@ const_debug unsigned int sysctl_sched_migration_cost = 500000UL;
  * (default: 10msec)
  */
 unsigned int __read_mostly sysctl_sched_shares_window = 10000000UL;
+
+#ifdef CONFIG_REAL_CFS
+unsigned int sysctl_sched_solocpi_interval = 1000000ULL; /* 2 sec interval */
+#endif
 
 #ifdef CONFIG_CFS_BANDWIDTH
 /*
@@ -594,6 +600,65 @@ calc_delta_fair(unsigned long delta, struct sched_entity *se)
 	return delta;
 }
 
+
+#ifdef CONFIG_REAL_CFS
+
+static int (*get_cpi)(void) = NULL;
+
+void register_get_cpi(int (*func_ptr)(void))
+{
+	get_cpi = func_ptr;
+}
+
+EXPORT_SYMBOL(register_get_cpi);
+
+static inline unsigned long
+calc_delta_cpifair(unsigned long delta, struct sched_entity *curr)
+{
+
+	u32 curr_cpi;
+
+	/* memguard is not loaded yet */
+	if (!get_cpi)
+		return delta;
+
+	/* curr is not task entity */
+	if (!task_of(curr))
+		return delta;
+
+	/* ask the memguard to get the wcpi value of the core since the last call */
+	curr_cpi = get_cpi();
+
+	/* filter unreliable data */
+	if (curr_cpi == 0)
+		return delta;
+
+	/* TODO: handle multiple tasks request sched bwlock at the 
+	   same time */
+	if (curr->solo_cpi == 0) {
+		if (task_of(curr)->bwlock_val == 0) {
+			task_of(curr)->bwlock_val = 1; // bw_lock
+			curr->corun_cpi = curr_cpi;
+		} 
+		else {
+			curr->solo_cpi = curr_cpi;
+			task_of(curr)->bwlock_val = 0; // bw_unlock
+		}
+	} else
+		curr->corun_cpi = curr_cpi;
+
+	if (curr->solo_cpi != 0 && curr->corun_cpi != 0) {
+		unsigned long delta_w;
+		delta_w = (unsigned long)(div64_u64(curr->solo_cpi * delta, curr->corun_cpi));
+		trace_printk("%s: solo_cpi: %u corun_cpi: %u delta: %ld delta_w: %ld\n",
+			     (current->comm) ? current->comm : "", 
+			     curr->solo_cpi, curr->corun_cpi, delta, delta_w);
+		return delta_w;
+	} else
+		return delta;
+}
+#endif
+
 /*
  * The idea is to set a period in which each task runs once.
  *
@@ -673,6 +738,9 @@ __update_curr(struct cfs_rq *cfs_rq, struct sched_entity *curr,
 	schedstat_add(cfs_rq, exec_clock, delta_exec);
 	delta_exec_weighted = calc_delta_fair(delta_exec, curr);
 
+#ifdef CONFIG_REAL_CFS
+	delta_exec_weighted = calc_delta_cpifair(delta_exec_weighted, curr);
+#endif
 	curr->vruntime += delta_exec_weighted;
 	update_min_vruntime(cfs_rq);
 
@@ -699,6 +767,19 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	if (!delta_exec)
 		return;
 
+#ifdef CONFIG_REAL_CFS
+	if (entity_is_task(curr)) {
+		extern int nr_bwlocked_cores(void);
+		if (curr->prev_solo_cpi_settime == 0)
+			curr->prev_solo_cpi_settime = now;
+		else if (now - curr->prev_solo_cpi_settime > sysctl_sched_solocpi_interval * 1000 && 
+			 nr_bwlocked_cores() == 0) 
+		{
+			curr->prev_solo_cpi_settime = now;
+			curr->solo_cpi = 0;
+		}
+	}
+#endif
 	__update_curr(cfs_rq, curr, delta_exec);
 	curr->exec_start = now;
 

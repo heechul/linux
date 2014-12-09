@@ -1192,6 +1192,11 @@ struct sched_entity {
 	struct sched_statistics statistics;
 #endif
 
+#ifdef CONFIG_REAL_CFS
+	u32 solo_cpi, corun_cpi;
+	u64 prev_solo_cpi_settime;
+#endif
+
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	struct sched_entity	*parent;
 	/* rq on which this entity is (to be) queued: */
@@ -2018,7 +2023,9 @@ extern unsigned int sysctl_sched_latency;
 extern unsigned int sysctl_sched_min_granularity;
 extern unsigned int sysctl_sched_wakeup_granularity;
 extern unsigned int sysctl_sched_child_runs_first;
-
+#ifdef CONFIG_REAL_CFS
+extern unsigned int sysctl_sched_solocpi_interval;
+#endif
 enum sched_tunable_scaling {
 	SCHED_TUNABLESCALING_NONE,
 	SCHED_TUNABLESCALING_LOG,

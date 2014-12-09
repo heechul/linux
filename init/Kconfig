@@ -859,6 +859,13 @@ config BWLOCK
 	help
 	  Enable BWLOCK: Memory Bandwidth Lock (work with MemGuard)
 
+config REAL_CFS
+	bool "Enable Really Completel Fair Scheduler (R-CFS)"
+	depends on BWLOCK
+	help
+	  Enable REAL_CFS Enable Really Completel Fair Scheduler (R-CFS). 
+	  R-CFS tries to make equal progress not equal time.
+
 config CHECKPOINT_RESTORE
 	bool "Checkpoint/restore support" if EXPERT
 	default n
