@@ -147,8 +147,11 @@ static ssize_t palloc_write(struct file *filp, const char __user *ubuf,
 		{
 			mc_xor_bits[bit] = xor_bit;
 		}
+	} else if (!strncmp(buf, "bit", 3)) {
+		int bit;
+		sscanf(buf + 4, "%d", &bit);
+		sysctl_palloc_mask |= (1<<bit);
 	}
-
         *ppos += cnt;
         return cnt;
 }
