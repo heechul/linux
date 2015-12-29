@@ -1135,7 +1135,8 @@ static void palloc_insert(struct zone *zone, struct page *page, int order)
 		list_add_tail(&page[i].lru, &zone->color_list[color]);
 		bitmap_set(zone->color_bitmap, color, 1);
 		zone->free_area[0].nr_free++;
-		rmv_page_order(&page[i]);
+		if (PageBuddy(&page[i]))
+			rmv_page_order(&page[i]);
 	}
 	memdbg(4, "add order=%d zone=%s\n", order, zone->name);
 }
