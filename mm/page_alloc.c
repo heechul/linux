@@ -70,7 +70,7 @@
 int memdbg_enable = 0;
 EXPORT_SYMBOL(memdbg_enable);
 
-static int sysctl_alloc_balance = 0;
+static int sysctl_alloc_balance = 4;
 /* palloc address bitmask */
 static unsigned long sysctl_palloc_mask = 0x0;
 

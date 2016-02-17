@@ -1048,7 +1048,7 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 /*
  * Leverich (EuroSys'14) shows that 
- * vruntime(T) = max(min(vruntime(*) - L, vruntime(T)
+ * vruntime(T) = max(min(vruntime(*)) - L, vruntime(T))
  * where L = sysctl_sched_latency / 2 
  * - heechul
  */
