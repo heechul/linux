@@ -66,6 +66,7 @@
 
 #ifdef CONFIG_CGROUP_PALLOC
 #include <linux/palloc.h>
+#include <linux/random.h>
 
 int memdbg_enable = 0;
 EXPORT_SYMBOL(memdbg_enable);
@@ -231,7 +232,7 @@ static int __init palloc_debugfs(void)
 	if (!debugfs_create_u64("palloc_mask", mode, dir, (u64 *)&sysctl_palloc_mask))
 		goto fail;
         if (!debugfs_create_u32("use_mc_xor", mode, dir, &use_mc_xor))
-                goto fail;
+		goto fail;
         if (!debugfs_create_u32("use_palloc", mode, dir, &use_palloc))
                 goto fail;
         if (!debugfs_create_u32("debug_level", mode, dir, &memdbg_enable))
@@ -1141,82 +1142,36 @@ static void palloc_insert(struct zone *zone, struct page *page, int order)
 	memdbg(4, "add order=%d zone=%s\n", order, zone->name);
 }
 
-/* return a colored page (order-0) and remove it from the colored cache */
-static inline struct page *palloc_find_cmap(struct zone *zone, COLOR_BITMAP(cmap),
-				     int order,
-				     struct palloc_stat *stat)
+/* return a colored page and remove it from the colored cache */
+static inline struct page *palloc_find_color(struct zone *zone, int color, 
+					     struct palloc_stat *stat)
 {
 	struct page *page;
-	COLOR_BITMAP(tmpmask);
-	int c;
-	unsigned int tmp_idx;
-	int found_w, want_w;
-	long rand_seed;
-	/* cache statistics */
-	if (stat) stat->cache_acc_cnt++;
+
+	BUG_ON(color >= MAX_PALLOC_BINS);
 	
-	/* find color cache entry */
-	if (!bitmap_intersects(zone->color_bitmap, cmap, MAX_PALLOC_BINS))
+	if (!test_bit(color, zone->color_bitmap))
 		return NULL;
 
-	bitmap_and(tmpmask, zone->color_bitmap, cmap, MAX_PALLOC_BINS);
-
-	/* must have a balance. */
-	found_w = bitmap_weight(tmpmask, MAX_PALLOC_BINS);
-	want_w  = bitmap_weight(cmap, MAX_PALLOC_BINS);
-	if (sysctl_alloc_balance && 
-	    found_w < want_w && 
-	    found_w < min(sysctl_alloc_balance, want_w) &&
-	    memdbg_enable)
-	{
-		ktime_t dur = ktime_sub(ktime_get(), stat->start);
-		if (dur.tv64 < 1000000) {
-			/* try to balance unless order=MAX-2 or 1ms has passed */
-			memdbg(4, "found_w=%d want_w=%d order=%d elapsed=%lld ns\n",
-			       found_w, want_w, order, dur.tv64);
-			stat->alloc_balance++;
-
-			return NULL;
-		}
-		stat->alloc_balance_timeout++;
-	}
-
-	/* choose a bit among the candidates */
-	if (sysctl_alloc_balance && memdbg_enable) {
-		rand_seed = (long)stat->start.tv64;
-	} else {
-		rand_seed = per_cpu(palloc_rand_seed, smp_processor_id())++; 
-		if (rand_seed > MAX_PALLOC_BINS)
-			per_cpu(palloc_rand_seed, smp_processor_id()) = 0;
-	}
-
-	tmp_idx = rand_seed % found_w;
-	for_each_set_bit(c, tmpmask, MAX_PALLOC_BINS) {
-		if (tmp_idx-- <= 0) 
-			break;
-	}
-
-
-	BUG_ON(c >= MAX_PALLOC_BINS);
-	BUG_ON(list_empty(&zone->color_list[c]));
+	BUG_ON(list_empty(&zone->color_list[color]));
+	page = list_entry(zone->color_list[color].next, struct page, lru);
 	
-	page = list_entry(zone->color_list[c].next, struct page, lru);
-	
-	memdbg(1, "Found colored page pfn %ld color %d seed %ld found/want %d/%d\n",
-	       page_to_pfn(page), c, rand_seed, found_w, want_w);
+	memdbg(2, "Found colored page pfn %ld color %d\n",
+	       page_to_pfn(page), color);
 
 	/* remove from the zone->color_list[color] */
 	list_del(&page->lru);
-	if (list_empty(&zone->color_list[c]))
-		bitmap_clear(zone->color_bitmap, c, 1);
+	if (list_empty(&zone->color_list[color]))
+		bitmap_clear(zone->color_bitmap, color, 1);
 	zone->free_area[0].nr_free--;
 
 	memdbg(5, "- del pfn %ld from color_list[%d]\n",
-	       page_to_pfn(page), c);
+	       page_to_pfn(page), color);
 
 	if (stat) stat->cache_hit_cnt++;
 	return page;
 }
+
 
 static inline void 
 update_stat(struct palloc_stat *stat, struct page *page, int iters)
@@ -1263,6 +1218,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	struct palloc_stat *c_stat = &palloc.stat[0];
 	struct palloc_stat *n_stat = &palloc.stat[1];
 	struct palloc_stat *f_stat = &palloc.stat[2];
+	int tot_colors = 0;
 	int iters = 0;
 	COLOR_BITMAP(tmpcmap);
 	unsigned long *cmap;
@@ -1270,31 +1226,46 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	if (memdbg_enable)
 		c_stat->start = n_stat->start = f_stat->start = ktime_get();
 
-	if (!use_palloc)
+	if (!use_palloc || migratetype != MIGRATE_MOVABLE)
 		goto normal_buddy_alloc;
+
+	tot_colors = palloc_bins();
+	memdbg(3, "tot_colors = %d\n", tot_colors);
 
 	/* cgroup information */
 	ph = ph_from_subsys(current->cgroups->subsys[palloc_subsys_id]);
-	if (ph && bitmap_weight(ph->cmap, MAX_PALLOC_BINS) > 0)
+	if (ph && bitmap_weight(ph->cmap, tot_colors) > 0)
 		cmap = ph->cmap;
 	else {
-		bitmap_fill(tmpcmap, MAX_PALLOC_BINS);
+		bitmap_fill(tmpcmap, tot_colors);
 		cmap = tmpcmap;
 	}
 
 	page = NULL;
 	if (order == 0) {
+		/* decide next color */
+		int next_color;
+		unsigned int tmp_idx;
+
+		/* random policy = random(cmap) */
+		get_random_bytes(&tmp_idx, sizeof(tmp_idx));
+		tmp_idx = tmp_idx % bitmap_weight(cmap, tot_colors);
+		for_each_set_bit(next_color, cmap, tot_colors) {
+			if (tmp_idx-- <= 0)
+				break;
+		}
+		memdbg(2, "next_color = %d\n", next_color);
+
+
 		/* find in the cache */
 		memdbg(5, "check color cache (mt=%d)\n", migratetype);
-		page = palloc_find_cmap(zone, cmap, 0, c_stat);
+		page = palloc_find_color(zone, next_color, c_stat);
 
 		if (page) {
 			update_stat(c_stat, page, iters);
 			return page;
 		}
-	}
 
-	if (order == 0) {
 		/* build color cache */
 		iters++;
 		/* search the entire list. make color cache in the process  */
@@ -1309,10 +1280,9 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 			list_for_each_safe(curr, tmp, 
 					   &area->free_list[migratetype]) 
 			{
-				iters++;
 				page = list_entry(curr, struct page, lru);
 				palloc_insert(zone, page, current_order);
-				page = palloc_find_cmap(zone, cmap, current_order, c_stat);
+				page = palloc_find_color(zone, next_color, c_stat);
 				if (page) {
 					update_stat(c_stat, page, iters);
 					memdbg(1, "Found at Zone %s pfn 0x%lx\n",
@@ -1320,6 +1290,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 					       page_to_pfn(page));
 					return page;
 				}
+				iters++;
 			}
 		}
 		memdbg(1, "Failed to find a matching color\n");
